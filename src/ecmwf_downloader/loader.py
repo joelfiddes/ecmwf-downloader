@@ -88,6 +88,16 @@ class ERA5Loader:
 
         # Resolve backend
         if isinstance(backend, str):
+            if backend == "auto":
+                from ecmwf_downloader.backends import select_backend
+
+                backend, auto_kwargs = select_backend(
+                    start_date=self.start_date,
+                    end_date=self.end_date,
+                    pressure_levels=self.pressure_levels,
+                )
+                backend_kwargs = {**auto_kwargs, **(backend_kwargs or {})}
+
             from ecmwf_downloader.backends import get_backend
 
             self._backend = get_backend(

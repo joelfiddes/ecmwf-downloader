@@ -28,9 +28,9 @@ def _add_era5_parser(subparsers) -> None:
 
     p.add_argument(
         "--backend",
-        choices=["google", "cds", "s3zarr", "openmeteo"],
-        default="google",
-        help="Data source backend (default: google)",
+        choices=["auto", "google", "cds", "s3zarr", "openmeteo"],
+        default="auto",
+        help="Data source backend (default: auto)",
     )
     p.add_argument(
         "--bbox",
@@ -155,6 +155,8 @@ def _run_era5(args) -> None:
         backend_kwargs["start_date"] = args.start
         backend_kwargs["end_date"] = args.end
         backend_kwargs["model"] = args.openmeteo_model
+    elif args.backend == "auto":
+        pass  # select_backend in loader injects the right kwargs
 
     loader = ERA5Loader(
         backend=args.backend,
