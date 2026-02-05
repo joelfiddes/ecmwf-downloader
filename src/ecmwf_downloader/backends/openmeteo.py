@@ -182,14 +182,17 @@ class OpenMeteoBackend(ERA5Backend):
     def _build_grid(self) -> tuple[np.ndarray, np.ndarray]:
         """Build a regular 0.25° grid from the bounding box.
 
+        Grid points are snapped to 0.25° and only those falling *within*
+        the bounding box are included (matching Google/CDS backend behaviour).
+
         Returns:
             (lats, lons) 1-D arrays snapped to 0.25° resolution.
         """
         step = 0.25
-        lat_min = math.floor(self.bbox.south / step) * step
-        lat_max = math.ceil(self.bbox.north / step) * step
-        lon_min = math.floor(self.bbox.west / step) * step
-        lon_max = math.ceil(self.bbox.east / step) * step
+        lat_min = math.ceil(self.bbox.south / step) * step
+        lat_max = math.floor(self.bbox.north / step) * step
+        lon_min = math.ceil(self.bbox.west / step) * step
+        lon_max = math.floor(self.bbox.east / step) * step
 
         lats = np.arange(lat_min, lat_max + step / 2, step)
         lons = np.arange(lon_min, lon_max + step / 2, step)
