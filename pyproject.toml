@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecmwf-downloader"
+version = "0.1.0"
+description = "Download ECMWF climate data (ERA5 reanalysis + IFS forecasts) from multiple sources"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    {name = "Joel Fiddes"},
+    {name = "Simon Filhol"},
+]
+dependencies = [
+    "xarray>=2023.0",
+    "numpy",
+    "pandas",
+    "fsspec",
+    "tqdm",
+    "tenacity",
+]
+
+[project.optional-dependencies]
+cds = ["cdsapi"]
+google = ["gcsfs", "h5netcdf"]
+s3 = ["s3fs"]
+zarr = ["zarr>=2.14", "dask"]
+forecast = ["ecmwf-opendata", "cfgrib"]
+all = [
+    "cdsapi",
+    "gcsfs",
+    "h5netcdf",
+    "s3fs",
+    "zarr>=2.14",
+    "dask",
+    "ecmwf-opendata",
+    "cfgrib",
+    "netcdf4",
+]
+dev = ["pytest", "pytest-cov"]
+
+[project.scripts]
+ecmwf-downloader = "ecmwf_downloader.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
