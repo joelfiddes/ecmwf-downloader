@@ -45,6 +45,11 @@ IFS_FORECAST_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 
 # Open-Meteo parameter → (ERA5 short name, conversion function)
 # Conversion: callable(numpy array) → numpy array in ERA5 units.
+#
+# For accumulated variables (ssrd, tp) the conversion produces per-HOUR
+# values.  The backend then sums over the time-resolution window in
+# fetch_day() so the output matches ERA5 convention (accumulated per
+# output timestep).
 
 _C_TO_K = 273.15
 _G = 9.80665
@@ -53,9 +58,13 @@ SURFACE_MAP = {
     "temperature_2m":       ("t2m",  lambda x: x + _C_TO_K),            # °C → K
     "dew_point_2m":         ("d2m",  lambda x: x + _C_TO_K),            # °C → K
     "surface_pressure":     ("sp",   lambda x: x * 100.0),              # hPa → Pa
-    "shortwave_radiation":  ("ssrd", lambda x: x * 3600.0),             # W/m² → J/m²
-    "precipitation":        ("tp",   lambda x: x / 1000.0),             # mm → m
+    "shortwave_radiation":  ("ssrd", lambda x: x * 3600.0),             # W/m² → J/m² per hour
+    "precipitation":        ("tp",   lambda x: x / 1000.0),             # mm → m per hour
 }
+
+# Accumulated surface variables that need summing over the time-resolution
+# window (see fetch_day).
+_ACCUM_SURF_VARS = {"ssrd", "tp"}
 
 # Pressure-level parameters (IFS mode only).
 # These are *templates*; the actual API parameter names include the level,
@@ -478,14 +487,32 @@ class OpenMeteoBackend(ERA5Backend):
             if self._cache_surf is None:
                 self._prefetch_all()
 
+        res_hours = {"1H": 1, "2H": 2, "3H": 3, "6H": 6}[self.time_resolution]
+
         day_start = date
         day_end = date + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
 
-        # Slice the day from cache
-        ds_surf = self._cache_surf.sel(time=slice(day_start, day_end))
+        # Slice wider to allow rolling sum of accumulated vars at day
+        # boundaries (e.g. at 00:00 with 3H resolution we need hours 22,23
+        # from the previous day).
+        wider_start = day_start - pd.Timedelta(hours=res_hours - 1)
+        ds_surf = self._cache_surf.sel(time=slice(wider_start, day_end))
 
-        # Filter to requested time steps
+        # For accumulated variables, sum hourly values over the time-
+        # resolution window so the output represents the full-period
+        # accumulation (matching ERA5 / IFS convention).
+        if res_hours > 1:
+            for var in _ACCUM_SURF_VARS:
+                if var in ds_surf:
+                    ds_surf[var] = (
+                        ds_surf[var]
+                        .rolling(time=res_hours, min_periods=1)
+                        .sum()
+                    )
+
+        # Filter to requested time steps and trim back to this day
         ds_surf = ds_surf.sel(time=ds_surf.time.dt.hour.isin(self._time_steps))
+        ds_surf = ds_surf.sel(time=slice(day_start, day_end))
 
         if self._cache_plev is not None and len(self._cache_plev.data_vars) > 0:
             ds_plev = self._cache_plev.sel(time=slice(day_start, day_end))
