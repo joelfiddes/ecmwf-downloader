@@ -27,6 +27,7 @@ cds = ["cdsapi"]
 google = ["gcsfs", "h5netcdf"]
 s3 = ["s3fs"]
 zarr = ["zarr>=2.14", "dask"]
+openmeteo = ["requests"]
 forecast = ["ecmwf-opendata", "cfgrib"]
 all = [
     "cdsapi",
@@ -38,6 +39,7 @@ all = [
     "ecmwf-opendata",
     "cfgrib",
     "netcdf4",
+    "requests",
 ]
 dev = ["pytest", "pytest-cov"]
 

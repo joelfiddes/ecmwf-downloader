@@ -28,7 +28,7 @@ def _add_era5_parser(subparsers) -> None:
 
     p.add_argument(
         "--backend",
-        choices=["google", "cds", "s3zarr"],
+        choices=["google", "cds", "s3zarr", "openmeteo"],
         default="google",
         help="Data source backend (default: google)",
     )
@@ -86,6 +86,12 @@ def _add_era5_parser(subparsers) -> None:
         "--zarr-url",
         default="",
         help="Zarr store URL (required for s3zarr backend)",
+    )
+    p.add_argument(
+        "--openmeteo-model",
+        choices=["era5", "ifs"],
+        default="era5",
+        help="Open-Meteo model: era5 (surface only, 1940+) or ifs (surface+plev, 2022+)",
     )
     p.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
 
@@ -145,6 +151,10 @@ def _run_era5(args) -> None:
             print("ERROR: --zarr-url is required for s3zarr backend", file=sys.stderr)
             sys.exit(1)
         backend_kwargs["zarr_url"] = args.zarr_url
+    elif args.backend == "openmeteo":
+        backend_kwargs["start_date"] = args.start
+        backend_kwargs["end_date"] = args.end
+        backend_kwargs["model"] = args.openmeteo_model
 
     loader = ERA5Loader(
         backend=args.backend,
