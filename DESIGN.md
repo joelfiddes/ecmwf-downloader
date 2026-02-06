@@ -38,15 +38,22 @@ nwp_downloader/
 ├── cmip6/          # Climate projections (future)
 │   ├── loader.py   # CMIP6Loader
 │   └── backends/   # esgf, google_cmip6
+├── preprocess/     # Transform raw downloads → simulation-ready
+│   ├── __init__.py
+│   ├── validate.py # Range checks, missing data detection
+│   ├── derived.py  # Compute strd, q, etc.
+│   ├── conventions.py  # Lat descending, lon -180:180, units
+│   └── chunking.py # Rechunk for access pattern
 ├── common/
 │   ├── bbox.py
 │   ├── variables.py
-│   ├── writer.py
-│   └── derived.py
+│   └── writer.py
 └── __init__.py
 ```
 
 Each module (era5, forecast, cmip6) is a self-contained domain with its own loader and backends, sharing common utilities.
+
+The `preprocess` module transforms raw downloads into simulation-ready datasets.
 
 ---
 
@@ -191,7 +198,7 @@ longitude: float (-180 to 180)
 level: int (hPa, ascending, i.e. 300, 500, 700, 850, 1000)
 ```
 
-**[QUESTION 2]:** Should latitude always be descending (north-first)? Some tools expect ascending. Should this be configurable?
+**[DECIDED]:** Latitude always descending (north-first). This is the ERA5/ECMWF convention and what TPS2 expects.
 
 ---
 
@@ -267,7 +274,42 @@ Computed if missing from source:
 | Relative humidity (`r`) | `q`, `t`, `level` | If `compute_rh=True` and `r` missing |
 | Surface geopotential (`z`) | `sp`, `msl`, `t2m` | IFS forecasts only (no native z) |
 
-**[QUESTION 5]:** Should derived variable computation be in ecmwf-downloader or left to the consumer (TPS2)? Current approach couples the downloader to meteorological domain knowledge.
+**[DECIDED]:** Derived variables computed in downloader. The downloader should deliver data ready-to-use. A preprocessor module handles all transformations needed to get raw downloads into simulation-ready state.
+
+---
+
+## Preprocessor Module
+
+The `preprocess` module ensures all downloaded data is simulation-ready before being written to the final Zarr cache. This runs automatically after download.
+
+### Pipeline
+
+```
+Raw Download → Validate → Derive → Conventions → Chunk → Ready Zarr
+```
+
+### Components
+
+| Module | Responsibility |
+|--------|---------------|
+| `validate.py` | Range checks (T: 180-350K, P≥0, RH: 0-100%), missing data detection, temporal continuity |
+| `derived.py` | Compute missing variables: strd from (t2m, d2m, cloud), q from (r, t, p) |
+| `conventions.py` | Ensure lat descending, lon -180:180, standard units (K, Pa, J/m², m) |
+| `chunking.py` | Rechunk for TPS2 access pattern (time-major for point extraction) |
+
+### Derived Variable Computation
+
+| Variable | Computed From | Method |
+|----------|---------------|--------|
+| `strd` | t2m, d2m, (cloud) | Dilley & O'Brien (1998) or Konzelmann et al. (1994) |
+| `q` | r, t, p | Clausius-Clapeyron: q = 0.622 * e / (p - 0.378*e) |
+| `r` | q, t, p | Inverse of above |
+
+### When Preprocessing Runs
+
+- **On download:** Each day is preprocessed before appending to Zarr
+- **On open:** Quick validation check (time range, variables present)
+- **Manual:** `nwp_downloader preprocess --validate-only` CLI command
 
 ---
 
@@ -372,10 +414,10 @@ TPS2 then:
 | # | Question | Status |
 |---|----------|--------|
 | 1 | Backend priority order: google vs openmeteo? | **Decided: See `priorities-nwp.md`** |
-| 2 | Latitude order: always descending or configurable? | Open |
+| 2 | Latitude order: always descending or configurable? | **Decided: always descending** |
 | 3 | Daily files: delete after yearly merge? | **Decided: No daily files. Single Zarr store.** |
 | 4 | Zarr pass-through mode (no local cache)? | **Decided: Local Zarr cache is default. Direct cloud read possible but not primary mode.** |
-| 5 | Derived variables: here or in consumer? | Open |
+| 5 | Derived variables: here or in consumer? | **Decided: in downloader (preprocess module)** |
 | 6 | IFSForecastLoader: separate class or unified pattern? | **Decided: separate module** (`nwp_downloader.forecast`) |
 | 7 | Scope boundary: any operations to add/remove? | Open |
 | 8 | Streaming API (return dataset, no disk write)? | **Decided: Hybrid. `fetch()` for small jobs, `open()` returns lazy handle to local Zarr for large jobs.** |

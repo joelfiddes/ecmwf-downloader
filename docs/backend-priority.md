@@ -28,7 +28,7 @@ Formal definitions for each NWP source, organized by module.
 
 | Source | ID | Resolution | Spatial Coverage | Temporal Coverage | S3 URL | Auth |
 |--------|-----|------------|------------------|-------------------|--------|------|
-| Switch S3 (Central Asia) | `s3zarr` | 31 km | 59-81°E, 32-45°N | 2000-2023 | `s3://spi-pamir-c7-sdsc/era5_data/central_asia.zarr/` | S3 keys |
+| Switch S3 (Central Asia) | `s3zarr` | 31 km | 43-90°E, 24-58°N | 1940-2023 | `s3://spi-pamir-c7-sdsc/era5_data/central_asia.zarr/` | S3 keys |
 
 **Regional sources are preferred when bbox fits within coverage** - faster, pre-subset.
 
@@ -119,19 +119,21 @@ zarr_path: era5_data/central_asia.zarr/
 full_url: s3://spi-pamir-c7-sdsc/era5_data/central_asia.zarr/
 format: Zarr
 resolution_km: 31
-bbox: [59, 32, 81, 45]  # Central Asia: west, south, east, north
-time_range: [2000-01-01, 2023-12-31]  # Approximate - confirm exact range
+bbox: [43, 24, 90, 58]  # Central Asia: west, south, east, north
+time_range: [1940-01-01, 2023-12-31]
 variables:
-  surface: [t2m, d2m, sp, z_surf, ssrd, strd, tp]
+  surface: [t2m, d2m, sp, z_surf, ssrd, strd, tp, tisr, u10, v10]
   pressure: [t, z, u, v, q]
-  levels: [300, 500, 700, 850, 1000]
+  levels: [300, 500, 600, 700, 800, 850, 900, 1000]
 auth:
   type: s3
   env_vars: [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
   endpoint_url: https://os.zhdk.cloud.switch.ch
-  env_file: /Users/joel/src/era5google/env  # Local reference
 latency: ~5s/day (pre-subset, fast)
-notes: Regional archive, preferred when bbox fits, requires S3 credentials
+notes: |
+  Regional archive covering Central Asia + surrounding regions.
+  Full ERA5 time range (1940-2023). Preferred when bbox fits.
+  Requires S3 credentials.
 ```
 
 #### `openmeteo` — Open-Meteo ERA5 API
