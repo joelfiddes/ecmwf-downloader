@@ -236,14 +236,38 @@ with backend as f:
 | Historical data (pre-2022) | S3 year files or Google |
 | Surface + pressure combined | Google (or hybrid) |
 
-### Prototype S3 Backend
+### S3 Backend Integration
 
-A prototype implementation exists at `src/OM/openmeteo_s3_backend.py` with:
-- Parallel variable fetching (configurable workers)
-- Year file support for historical data
-- ERA5Backend-compatible interface
+The S3 backend is available at `ecmwf_downloader.reanalysis.backends.openmeteo_s3`:
 
-To integrate, the backend needs:
-- Missing variable handling (z, strd, q)
-- Cross-chunk reads for date ranges spanning boundaries
-- Registration in backends registry
+```python
+from ecmwf_downloader.reanalysis.backends import get_backend
+
+backend = get_backend(
+    "openmeteo_s3",
+    bbox=bbox,
+    cache_dir="/tmp/s3_cache",
+    max_workers=4,
+    dataset="era5",  # or "era5_land"
+)
+ds_surf, ds_plev = backend.fetch_day(date)
+```
+
+Or via `select_backend()` with `prefer_s3=True` for large regions:
+
+```python
+from ecmwf_downloader.reanalysis.backends import select_backend
+
+name, kwargs = select_backend(
+    start_date, end_date,
+    pressure_levels=None,  # S3 has no pressure level data
+    prefer_s3=True,        # Prioritize S3 over API
+)
+```
+
+**Dependencies**: `pip install omfiles fsspec s3fs`
+
+**Known limitations**:
+- Surface variables only (no pressure levels)
+- Missing: strd (longwave), q (specific humidity), z (geopotential has nodata issues)
+- Cross-chunk reads not yet optimized for date ranges spanning boundaries
