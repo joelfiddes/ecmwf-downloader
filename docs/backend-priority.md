@@ -20,7 +20,9 @@ Formal definitions for each NWP source, organized by module.
 | Google ARCO-ERA5 | `google` | 31 km | 1940-present | `gs://gcp-public-data-arco-era5` | Anonymous |
 | CDS (Copernicus) | `cds` | 31 km | 1940-present | `cds.climate.copernicus.eu` | API key |
 | OpenMeteo ERA5 | `openmeteo` | 31 km | 1940-present | `archive-api.open-meteo.com` | Anonymous |
-| OpenMeteo ERA5-Land | `openmeteo_era5land` | **9 km** | 1950-present | `archive-api.open-meteo.com` | Anonymous |
+| OpenMeteo ERA5-Land | `openmeteo_era5land` | 9 km* | 1950-present | `archive-api.open-meteo.com` | Anonymous |
+
+*ERA5-Land precip is NOT genuinely 9km — it's 31km ERA5 precip fed to a 9km LSM rerun. Use IFS for true 9km precip.
 
 #### Regional
 
@@ -160,7 +162,7 @@ type: reanalysis
 product: ERA5-Land
 endpoint: https://archive-api.open-meteo.com/v1/archive
 format: REST/JSON
-resolution_km: 9
+resolution_km: 9  # BUT SEE WARNING BELOW
 bbox: [-180, -90, 180, 90]  # Global
 time_range: [1950-01-01, present - 5 days]
 variables:
@@ -169,7 +171,12 @@ variables:
   levels: []
 auth: anonymous
 latency: ~0.5s/day
-notes: 9km resolution for precip/temp - big win for snow/hydro applications
+notes: |
+  ⚠️ NOT RECOMMENDED FOR PRECIPITATION
+  ERA5-Land is a land surface model rerun at 9km, BUT precipitation forcing
+  comes from ERA5 at 31km. The "9km" precip is just interpolated 31km data.
+  For genuinely higher-resolution precip, use OpenMeteo IFS (2022+).
+  ERA5-Land t2m is similarly just interpolated — TPS2 lapse correction is better.
 ```
 
 ---
@@ -312,7 +319,7 @@ Each variable lists the preferred source in priority order.
 | d2m | 2m dewpoint | OM > Google > CDS | All sources |
 | sp | Surface pressure | OM > Google > CDS | All sources |
 | ssrd | Shortwave radiation | OM > Google > CDS | OM sums hourly values per timestep |
-| tp | Precipitation | **OM ERA5-Land (9km)** > OM > Google > CDS | 9km preferred for snow/hydro |
+| tp | Precipitation | **OM IFS (9km, 2022+)** > Google > CDS | Always use 9km IFS when available |
 | z | Surface geopotential | Google > CDS > OM | OM uses DEM not model terrain |
 | strd | Longwave radiation | Google > CDS > **compute** | Not on OM; compute from t2m, d2m |
 | u10 | 10m U wind | OM > Google > CDS | All sources |
@@ -337,32 +344,38 @@ Each variable lists the preferred source in priority order.
 
 ### Precipitation (`tp`) — 9km Available
 
-| Source | Resolution | Recommendation |
-|--------|------------|----------------|
-| ERA5 (Google/CDS) | 31 km | Default |
-| ERA5-Land (OpenMeteo) | **9 km** | **Preferred for snow/hydro applications** |
+| Source | Resolution | Temporal | Recommendation |
+|--------|------------|----------|----------------|
+| ERA5 (Google/CDS) | 31 km | 1940-present | Default for pre-2022 |
+| OpenMeteo IFS | **9 km** | 2022-present | **Always preferred when available** |
+| ERA5-Land (OpenMeteo) | 9 km | 1950-present | ⚠️ Not recommended — see note |
+
+**⚠️ ERA5-Land precipitation caveat:**
+ERA5-Land is NOT higher-resolution precipitation forcing. It's ERA5 (31km) precipitation fed through a higher-resolution land surface model rerun. The precipitation input is still 31km. For genuinely higher-resolution precip, use IFS-based products.
 
 ```python
+# For 2022+ data: always use 9km IFS precip
 source_map = {
     "default": "google",
-    "tp": "openmeteo_era5land",  # 4x resolution improvement
+    "tp": "openmeteo_ifs",  # Genuine 9km precipitation (2022+)
+}
+
+# For pre-2022: stuck with 31km ERA5
+source_map = {
+    "default": "google",
+    # No 9km precip available before 2022
 }
 ```
 
-**When to use 9km precip:**
-- Snow modeling (spatial variability matters)
-- Hydrological modeling (catchment-scale)
-- Complex terrain (Alps, Himalaya, Andes)
-
-**When 31km is fine:**
-- Large-scale climate analysis
-- Flat terrain
-- Computational constraints
+**9km IFS precip is always preferred when available (2022+):**
+- Genuine 9km resolution (not downscaled)
+- Better orographic precipitation representation
+- Critical for snow/hydro in complex terrain
 
 ### Temperature (`t2m`)
 
-ERA5-Land also has 9km temperature, but benefit is smaller than precip.
-Consider for high-altitude sites where lapse rate interpolation is insufficient.
+ERA5-Land has 9km t2m, but this is just ERA5 t2m interpolated to 9km grid — minimal benefit.
+TPS2 lapse rate correction from pressure levels is more physically meaningful.
 
 ### Wind (`u10`, `v10`)
 
@@ -434,10 +447,11 @@ given: start_date, end_date, required_variables, bbox
    if q_needed and backend has only r:
        compute q from r, t, p
 
-7. Handle high-res precip override
-   if high_res_precip and "tp" in required_variables:
-       fetch tp separately from openmeteo_era5land (9km)
+7. Handle high-res precip (always preferred when available)
+   if start_date >= 2022-01-01 and "tp" in required_variables:
+       fetch tp from openmeteo_ifs (genuine 9km)
        return as separate dataset for TPS2 to align
+   # Note: Do NOT use ERA5-Land for precip — it's fake 9km (31km input)
 
 8. Surface geopotential accuracy
    if z accuracy matters (model terrain vs DEM):
