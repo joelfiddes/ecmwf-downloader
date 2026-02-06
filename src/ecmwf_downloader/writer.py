@@ -199,14 +199,16 @@ class ZarrWriter(BaseWriter):
             encoding = {
                 var: {"compressors": compressor} for var in ds.data_vars
             }
-            ds.chunk(self.chunks).to_zarr(
+            # Filter chunks to only include dimensions present in the dataset
+            chunks = {k: v for k, v in self.chunks.items() if k in ds.dims}
+            ds.chunk(chunks).to_zarr(
                 str(self.zarr_path), mode="w", encoding=encoding
             )
             self._initialized = True
             logger.debug("Created zarr store: %s", self.zarr_path)
         else:
-            # Append with region='auto'
-            ds.to_zarr(str(self.zarr_path), mode="a", region="auto", align_chunks=True)
+            # Append along time dimension
+            ds.to_zarr(str(self.zarr_path), mode="a", append_dim="time")
             logger.debug("Appended %s to zarr store", date_str)
 
     def finalize(self) -> None:

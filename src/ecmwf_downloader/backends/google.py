@@ -247,13 +247,17 @@ class GoogleCloudBackend(ERA5Backend):
         flist = self._download_files(uri_list)
 
         logger.debug("Opening and preprocessing %d files", len(flist))
-        ds = xr.open_mfdataset(
-            flist,
-            chunks={},
-            parallel=True,
-            preprocess=self._preprocess,
-            engine="scipy",
-        ).load()
+        # Open each file individually, preprocess, load into memory, then merge
+        # (open_mfdataset with combine_by_coords fails when files have
+        # different variables but same coordinates - they need merge, not concat)
+        datasets = []
+        for f in flist:
+            ds_single = xr.open_dataset(f, engine="scipy")
+            ds_single = self._preprocess(ds_single).load()  # Load immediately
+            datasets.append(ds_single)
+
+        # Merge all datasets (handles different variables with same coords)
+        ds = xr.merge(datasets, compat="override", join="outer")
 
         self._clear_cache()
 
