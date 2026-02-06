@@ -19,14 +19,18 @@ BACKEND_REGISTRY: dict[str, str] = {
     "s3zarr": "ecmwf_downloader.reanalysis.backends.s3zarr:S3ZarrBackend",
     "openmeteo": "ecmwf_downloader.reanalysis.backends.openmeteo:OpenMeteoBackend",
     "openmeteo_s3": "ecmwf_downloader.reanalysis.backends.openmeteo_s3:OpenMeteoS3Backend",
+    "hybrid": "ecmwf_downloader.reanalysis.backends.hybrid:HybridBackend",
 }
 
 # Key dependency for each backend used by the availability check.
+# Note: hybrid has no direct dependency, it uses other backends.
 _BACKEND_DEPS: dict[str, str] = {
     "openmeteo": "requests",
     "openmeteo_s3": "omfiles",  # Also requires fsspec, s3fs
     "google": "gcsfs",
     "cds": "cdsapi",
+    "s3zarr": "zarr",
+    # "hybrid" not listed — it delegates to other backends
 }
 
 
@@ -114,9 +118,11 @@ def get_backend(name: str, **kwargs) -> "ERA5Backend":
 
     Args:
         name: Backend name. Available backends:
+            - 'hybrid': Multi-backend (default) — routes variables to optimal sources:
+              surface from S3, precip from IFS (9km), plev+strd from Google
             - 'google': Google ARCO-ERA5 (Zarr, fast, 1940+)
             - 'cds': Copernicus Climate Data Store (NetCDF, reliable, 1940+)
-            - 's3zarr': Custom S3 Zarr mirror
+            - 's3zarr': Regional S3 Zarr (Central Asia, fastest when bbox fits)
             - 'openmeteo': Open-Meteo REST API (fastest, surface 1940+, plev 2022+)
             - 'openmeteo_s3': Open-Meteo S3 direct (.om files, no rate limits,
               surface only, exact 0.25° grid, use for large regions)

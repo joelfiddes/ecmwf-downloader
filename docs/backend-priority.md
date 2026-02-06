@@ -5,6 +5,37 @@
 
 ---
 
+## TL;DR — Hybrid Strategy
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 0: Regional Override                                                   │
+│   IF bbox ⊆ Central Asia (43-90°E, 24-58°N) AND time ≤ 2023:               │
+│     → s3zarr FOR EVERYTHING (5s/day, complete vars)                        │
+│     → DONE                                                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ HYBRID MODE (global, or Central Asia 2024+)                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ SURFACE (t2m, d2m, sp, ssrd, u10, v10):                                    │
+│   Primary:   OpenMeteo S3                                                   │
+│   Fallback:  API → Google → CDS                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ PRECIPITATION (tp):                                                         │
+│   2022+:     IFS Forecast S3/API (genuine 9km)                             │
+│   Pre-2022:  OpenMeteo S3 → API → Google → CDS                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ PRESSURE LEVELS (t, z, u, v, q) + LONGWAVE (strd):                         │
+│   Primary:   Google ARCO                                                    │
+│   Fallback:  CDS                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key insight:** s3zarr is the golden path for Central Asia ≤2023 — skip hybrid entirely.
+
+---
+
 ## Source Definitions
 
 Formal definitions for each NWP source, organized by module.
@@ -279,41 +310,69 @@ notes: Cloud-optimized Zarr, faster than ESGF for supported models
 
 ## Priority Logic
 
-### Configuration: `priority_strategy`
+### Configuration: `mode`
 
 ```python
 ERA5Loader(
-    priority_strategy="speed",  # or "reliability"
+    mode="hybrid",  # or "single"
     ...
 )
 ```
 
-| Strategy | Priority Order | Use Case |
-|----------|---------------|----------|
-| `speed` (default) | **s3zarr*** > openmeteo > google > cds | Operational, large jobs |
-| `reliability` | **s3zarr*** > google > cds > openmeteo | Research, variable completeness |
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `hybrid` (default) | Multiple backends per fetch, variable-optimized | TPS2 forcing (complete + fast) |
+| `single` | One backend for all variables | Simple use cases, debugging |
 
-*s3zarr always wins when bbox fits — it's both fast AND reliable (pre-subset, complete variables).
+### Hybrid Mode (Default)
 
-**Default: `speed`** — 10-30x faster for most jobs, with automatic fallback when variables missing (strd, q, u/v on plev).
+Hybrid mode fetches different variables from different backends to optimize for both speed and completeness:
 
-```yaml
-# Config file example
-nwp:
-  priority_strategy: speed  # or "reliability"
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 0: Regional Check                                                      │
+│   IF bbox ⊆ s3zarr coverage AND time ≤ 2023:                               │
+│     → s3zarr for ALL variables (fastest + complete)                        │
+│     → Skip hybrid, return immediately                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
 
-  # Override for specific jobs needing all variables
-  # priority_strategy: reliability
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 1: Surface Variables (t2m, d2m, sp, ssrd, u10, v10)                   │
+│   Primary:   openmeteo_s3 (exact 0.25° grid, no rate limits)               │
+│   Fallback:  openmeteo API → google → cds                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 2: Precipitation (tp)                                                  │
+│   IF date >= 2022-01-01:                                                    │
+│     Primary:   openmeteo_ifs (genuine 9km forecast archive)                │
+│     Fallback:  openmeteo_s3 → google → cds                                  │
+│   ELSE (pre-2022):                                                          │
+│     Primary:   openmeteo_s3                                                 │
+│     Fallback:  openmeteo API → google → cds                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ STEP 3: Pressure Levels (t, z, u, v, q) + Longwave (strd)                  │
+│   Primary:   google (only source with complete plev + strd)                │
+│   Fallback:  cds                                                            │
+│   Note: OpenMeteo blacklisted for u, v, q, strd (missing or large errors)  │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Priority Table (Speed-First)
+**Why hybrid?**
+- OpenMeteo S3: Fast surface vars, exact grid, no rate limits
+- IFS 9km precip: Genuine high-res precipitation (not interpolated like ERA5-Land)
+- Google: Only reliable source for pressure levels + longwave
+
+### Single Mode
+
+For simple use cases or debugging, single mode uses one backend for everything:
 
 | Time range | Need plev? | Priority 1 | Priority 2 | Priority 3 |
 |------------|-----------|------------|------------|------------|
-| 2022+ | yes | **OM IFS** (~1s/day) | Google (~14s/day) | CDS (queued) |
-| 2022+ | no | **OM ERA5** (~0.4s/day) | Google (~14s/day) | CDS (queued) |
-| 1940-2021 | yes | **Google** (~14s/day) | CDS (queued) | - |
-| 1940-2021 | no | **OM ERA5** (~0.4s/day) | Google (~14s/day) | CDS (queued) |
+| Any | yes | **s3zarr** (if regional) | google | cds |
+| Any | no | **s3zarr** (if regional) | openmeteo_s3 | google |
 
 ---
 
@@ -420,86 +479,90 @@ Stick with ERA5 (31km). Cloud effects dominate; resolution less important.
 
 ## Decision Logic
 
+### Hybrid Mode (Default)
+
+```python
+def select_hybrid_sources(bbox, start_date, end_date, pressure_levels):
+    """
+    Returns dict mapping variable groups to backends.
+
+    Returns:
+        {
+            "surface": (backend_name, backend_kwargs),
+            "precip": (backend_name, backend_kwargs),
+            "plev_strd": (backend_name, backend_kwargs),
+        }
+    """
+
+    # ─── STEP 0: Regional override ───────────────────────────────────
+    # s3zarr is fastest AND complete for Central Asia ≤2023
+    if bbox_within(bbox, S3ZARR_BBOX) and end_date <= "2023-12-31":
+        return {
+            "surface": ("s3zarr", {}),
+            "precip": ("s3zarr", {}),
+            "plev_strd": ("s3zarr", {}),
+        }
+
+    # ─── STEP 1: Surface variables ───────────────────────────────────
+    # OpenMeteo S3: exact 0.25° grid, no rate limits, fast
+    surface_backend = select_with_fallback(
+        ["openmeteo_s3", "openmeteo", "google", "cds"],
+        required_vars=["t2m", "d2m", "sp", "ssrd", "u10", "v10"],
+    )
+
+    # ─── STEP 2: Precipitation ───────────────────────────────────────
+    # 2022+: IFS 9km is genuine high-res (not interpolated like ERA5-Land)
+    if start_date >= pd.Timestamp("2022-01-01"):
+        precip_backend = select_with_fallback(
+            ["openmeteo_ifs", "openmeteo_s3", "google", "cds"],
+            required_vars=["tp"],
+        )
+    else:
+        precip_backend = select_with_fallback(
+            ["openmeteo_s3", "openmeteo", "google", "cds"],
+            required_vars=["tp"],
+        )
+
+    # ─── STEP 3: Pressure levels + longwave ──────────────────────────
+    # Only Google/CDS have: u, v, q on plev + strd
+    # OpenMeteo blacklisted: u/v have 43m/s errors, q/strd missing
+    if pressure_levels:
+        plev_backend = select_with_fallback(
+            ["google", "cds"],  # OpenMeteo blacklisted for plev
+            required_vars=["t", "z", "u", "v", "q", "strd"],
+        )
+    else:
+        # Surface-only mode: still need strd from Google
+        plev_backend = select_with_fallback(
+            ["google", "cds"],
+            required_vars=["strd"],
+        )
+
+    return {
+        "surface": surface_backend,
+        "precip": precip_backend,
+        "plev_strd": plev_backend,
+    }
 ```
-given: start_date, end_date, required_variables, bbox, priority_strategy="speed"
 
-0. Check regional source FIRST (always wins when available)
-   if bbox_within(bbox, s3zarr.bbox) and time_within([start, end], s3zarr.time_range):
-       use s3zarr  # Fast + reliable + complete variables
-       return
+### Single Mode
 
-1. Set fallback priority order from strategy
-   if priority_strategy == "speed":
-       base_order = [openmeteo, google, cds]
-   else:  # reliability
-       base_order = [google, cds, openmeteo]
+For debugging or simple use cases:
 
-2. Check for blacklisted variables (skip to next section)
+```python
+def select_single_source(bbox, start_date, end_date, pressure_levels):
+    """Select one backend for all variables."""
 
-2. Determine if pressure levels are needed
-   plev_needed = any variable in {t, z, u, v, r, q} is required
+    # Regional always wins
+    if bbox_within(bbox, S3ZARR_BBOX) and end_date <= "2023-12-31":
+        return "s3zarr"
 
-3. Determine time range category
-   if start_date >= 2022-01-01:
-       era = "post2022"
-   else:
-       era = "pre2022"
+    # Need pressure levels or strd → must use Google/CDS
+    if pressure_levels or needs_strd:
+        return select_with_fallback(["google", "cds"])
 
-4. Check special variable requirements
-   strd_needed = "strd" in required_variables
-   q_needed = "q" in required_variables and "r" not sufficient
-   high_res_precip = config.get("high_res_precip", False)
-
-5. Select backend
-
-   if regional_available:
-       try s3zarr
-       # Fall through if fails
-
-3. Check for blacklisted variables that force Google/CDS
-   blacklisted_vars = {"u", "v", "q", "strd"} & set(required_variables)
-   if blacklisted_vars:
-       # Must use Google/CDS for these — OpenMeteo has errors or missing
-       use google
-       fallback: cds
-       # Note: Can still fetch tp separately from OM IFS for 9km precip
-
-4. Apply priority strategy
-   if era == "post2022" and plev_needed:
-       try openmeteo model=ifs
-       fallback: google
-       fallback: cds
-
-   elif era == "post2022" and not plev_needed:
-       try openmeteo model=era5
-       fallback: google
-       fallback: cds
-
-   elif era == "pre2022" and plev_needed:
-       try google
-       fallback: cds
-
-   elif era == "pre2022" and not plev_needed:
-       try openmeteo model=era5
-       fallback: google
-       fallback: cds
-
-6. Handle computed/missing variables
-   if strd_needed and backend is openmeteo:
-       compute strd from t2m, d2m, cloud cover
-
-   if q_needed and backend has only r:
-       compute q from r, t, p
-
-7. Handle high-res precip (always preferred when available)
-   if start_date >= 2022-01-01 and "tp" in required_variables:
-       fetch tp from openmeteo_ifs (genuine 9km)
-       return as separate dataset for TPS2 to align
-   # Note: Do NOT use ERA5-Land for precip — it's fake 9km (31km input)
-
-8. Surface geopotential accuracy
-   if z accuracy matters (model terrain vs DEM):
-       prefer google/cds over openmeteo
+    # Surface only → OpenMeteo S3 preferred
+    return select_with_fallback(["openmeteo_s3", "openmeteo", "google", "cds"])
 ```
 
 ---
@@ -582,51 +645,60 @@ Falling back to google... [SUCCESS]
 
 ## Configuration Examples
 
-### Default (speed priority)
+### Default (hybrid mode)
 ```python
 ERA5Loader(
-    priority_strategy="speed",  # Default - fastest source first
+    mode="hybrid",  # Default — multi-backend, variable-optimized
+    ...
+)
+# Surface from OpenMeteo S3, precip from IFS (2022+), plev+strd from Google
+```
+
+### Single backend (bypass hybrid)
+```python
+ERA5Loader(
+    mode="single",
+    backend="google",  # Force single backend for all variables
     ...
 )
 ```
 
-### Reliability priority
+### Regional archive (auto-detected)
 ```python
+# If bbox is within Central Asia and time ≤ 2023, s3zarr is auto-selected
 ERA5Loader(
-    priority_strategy="reliability",  # Google first, complete variables
+    bbox=(68.0, 39.0, 72.0, 42.0),  # Tajikistan
+    start_date="2020-01-01",
+    end_date="2020-12-31",
     ...
 )
+# → Automatically uses s3zarr (fast + complete)
 ```
 
-### Explicit backend (bypass priority logic)
-```python
-ERA5Loader(backend="google", ...)  # Force specific backend
-```
-
-### High-res precipitation
+### Force regional archive
 ```python
 ERA5Loader(
-    source_map={
-        "default": "google",
-        "tp": "openmeteo_era5land",
-    },
-    ...
-)
-```
-
-### Regional archive
-```python
-ERA5Loader(
+    mode="single",
     backend="s3zarr",
     backend_kwargs={"zarr_url": "s3://spi-pamir-c7-sdsc/era5_data/central_asia.zarr/"},
     ...
 )
 ```
 
+### Surface-only (no pressure levels)
+```python
+ERA5Loader(
+    pressure_levels=None,  # No pressure levels
+    ...
+)
+# → Surface from OpenMeteo S3, strd from Google (still needed for energy balance)
+```
+
 ### Explicit fallback chain
 ```python
 ERA5Loader(
-    backend_priority=["s3zarr", "google", "cds"],
+    mode="single",
+    backend_priority=["s3zarr", "openmeteo_s3", "google", "cds"],
     ...
 )
 ```
@@ -658,5 +730,7 @@ As new sources become available, add entries here:
 
 | Date | Change |
 |------|--------|
+| 2026-02-06 | **Hybrid mode**: Multi-backend fetching (S3 surface, IFS precip, Google plev+strd) |
+| 2026-02-06 | Added OpenMeteo S3 backend for direct .om file access |
 | 2026-02-06 | Merged source definitions, added regional sources, 9km precip |
 | Previous | Initial version with speed-first priority |
