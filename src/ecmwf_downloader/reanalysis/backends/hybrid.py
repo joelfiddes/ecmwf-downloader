@@ -134,9 +134,20 @@ class HybridBackend(ERA5Backend):
             for name in ["openmeteo_s3", "openmeteo", "google", "cds"]:
                 if _check_available(name):
                     try:
-                        kwargs = {"bbox": self.bbox, "cache_dir": self.cache_dir}
+                        kwargs = {
+                            "bbox": self.bbox,
+                            "cache_dir": self.cache_dir,
+                            "pressure_levels": [],  # Surface only
+                        }
                         if name == "openmeteo":
                             kwargs["model"] = "era5"
+                            # OpenMeteo needs date range
+                            if self._start_date and self._end_date:
+                                kwargs["start_date"] = str(self._start_date.date())
+                                kwargs["end_date"] = str(self._end_date.date())
+                        if name == "openmeteo_s3":
+                            # S3 backend doesn't need pressure_levels in kwargs
+                            del kwargs["pressure_levels"]
                         self._surface_backend = get_backend(name, **kwargs)
                         logger.info("HybridBackend: surface backend = %s", name)
                         break
@@ -164,11 +175,24 @@ class HybridBackend(ERA5Backend):
             for name in candidates:
                 if _check_available(name):
                     try:
-                        kwargs = {"bbox": self.bbox, "cache_dir": self.cache_dir}
+                        kwargs = {
+                            "bbox": self.bbox,
+                            "cache_dir": self.cache_dir,
+                            "pressure_levels": [],
+                        }
                         if name == "openmeteo" and use_ifs:
                             kwargs["model"] = "ifs"  # 9km precipitation
+                            # OpenMeteo needs date range
+                            if self._start_date and self._end_date:
+                                kwargs["start_date"] = str(self._start_date.date())
+                                kwargs["end_date"] = str(self._end_date.date())
                         elif name == "openmeteo":
                             kwargs["model"] = "era5"
+                            if self._start_date and self._end_date:
+                                kwargs["start_date"] = str(self._start_date.date())
+                                kwargs["end_date"] = str(self._end_date.date())
+                        if name == "openmeteo_s3":
+                            del kwargs["pressure_levels"]
                         self._precip_backend = get_backend(name, **kwargs)
                         logger.info("HybridBackend: precip backend = %s (ifs=%s)", name, use_ifs)
                         break
@@ -186,6 +210,15 @@ class HybridBackend(ERA5Backend):
             from ecmwf_downloader.reanalysis.backends import get_backend, _check_available
 
             # Only Google/CDS have complete plev + strd
+            # Use explicit variable lists to avoid relative_humidity issue
+            plev_vars = [
+                "temperature",
+                "geopotential",
+                "u_component_of_wind",
+                "v_component_of_wind",
+                "specific_humidity",
+            ]
+
             for name in ["google", "cds"]:
                 if _check_available(name):
                     try:
@@ -194,6 +227,7 @@ class HybridBackend(ERA5Backend):
                             bbox=self.bbox,
                             pressure_levels=self.pressure_levels,
                             cache_dir=self.cache_dir,
+                            plev_vars=plev_vars,
                         )
                         logger.info("HybridBackend: plev backend = %s", name)
                         break
