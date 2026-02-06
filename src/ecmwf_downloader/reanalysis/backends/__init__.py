@@ -14,10 +14,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 BACKEND_REGISTRY: dict[str, str] = {
-    "cds": "ecmwf_downloader.backends.cds:CDSBackend",
-    "google": "ecmwf_downloader.backends.google:GoogleCloudBackend",
-    "s3zarr": "ecmwf_downloader.backends.s3zarr:S3ZarrBackend",
-    "openmeteo": "ecmwf_downloader.backends.openmeteo:OpenMeteoBackend",
+    "cds": "ecmwf_downloader.reanalysis.backends.cds:CDSBackend",
+    "google": "ecmwf_downloader.reanalysis.backends.google:GoogleCloudBackend",
+    "s3zarr": "ecmwf_downloader.reanalysis.backends.s3zarr:S3ZarrBackend",
+    "openmeteo": "ecmwf_downloader.reanalysis.backends.openmeteo:OpenMeteoBackend",
 }
 
 # Key dependency for each backend used by the availability check.
