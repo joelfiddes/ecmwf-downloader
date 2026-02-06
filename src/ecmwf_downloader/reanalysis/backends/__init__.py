@@ -18,11 +18,13 @@ BACKEND_REGISTRY: dict[str, str] = {
     "google": "ecmwf_downloader.reanalysis.backends.google:GoogleCloudBackend",
     "s3zarr": "ecmwf_downloader.reanalysis.backends.s3zarr:S3ZarrBackend",
     "openmeteo": "ecmwf_downloader.reanalysis.backends.openmeteo:OpenMeteoBackend",
+    "openmeteo_s3": "ecmwf_downloader.reanalysis.backends.openmeteo_s3:OpenMeteoS3Backend",
 }
 
 # Key dependency for each backend used by the availability check.
 _BACKEND_DEPS: dict[str, str] = {
     "openmeteo": "requests",
+    "openmeteo_s3": "omfiles",  # Also requires fsspec, s3fs
     "google": "gcsfs",
     "cds": "cdsapi",
 }
@@ -44,13 +46,19 @@ def select_backend(
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
     pressure_levels: list[int] | None,
+    prefer_s3: bool = False,
 ) -> tuple[str, dict]:
     """Choose the fastest available backend for the given parameters.
 
     Priority logic:
         plev needed + all post-2022 → openmeteo(ifs) → google → cds
         plev needed + pre-2022      → google → cds
-        no plev needed              → openmeteo(era5) → google → cds
+        no plev needed              → openmeteo(era5) → openmeteo_s3 → google → cds
+        no plev + prefer_s3         → openmeteo_s3 → openmeteo(era5) → google → cds
+
+    Note:
+        Use prefer_s3=True for large regions (>1000 grid points) where API rate
+        limits apply, or when exact 0.25° grid alignment is required.
 
     Returns:
         (backend_name, backend_kwargs) ready to pass to ``get_backend``.
@@ -72,9 +80,19 @@ def select_backend(
             ("google", {}),
             ("cds", {}),
         ]
+    elif prefer_s3:
+        # Large regions or grid alignment required: prefer S3
+        candidates = [
+            ("openmeteo_s3", {"dataset": "era5"}),
+            ("openmeteo", {"model": "era5", "start_date": str(start_date.date()), "end_date": str(end_date.date())}),
+            ("google", {}),
+            ("cds", {}),
+        ]
     else:
+        # Default: API is faster for small regions
         candidates = [
             ("openmeteo", {"model": "era5", "start_date": str(start_date.date()), "end_date": str(end_date.date())}),
+            ("openmeteo_s3", {"dataset": "era5"}),
             ("google", {}),
             ("cds", {}),
         ]
@@ -87,7 +105,7 @@ def select_backend(
     tried = [name for name, _ in candidates]
     raise RuntimeError(
         f"No backend available. Tried: {tried}. "
-        "Install one of: requests (openmeteo), gcsfs (google), cdsapi (cds)."
+        "Install one of: requests (openmeteo), omfiles (openmeteo_s3), gcsfs (google), cdsapi (cds)."
     )
 
 
@@ -95,7 +113,13 @@ def get_backend(name: str, **kwargs) -> "ERA5Backend":
     """Instantiate a backend by name.
 
     Args:
-        name: One of 'cds', 'google', 's3zarr', 'openmeteo'.
+        name: Backend name. Available backends:
+            - 'google': Google ARCO-ERA5 (Zarr, fast, 1940+)
+            - 'cds': Copernicus Climate Data Store (NetCDF, reliable, 1940+)
+            - 's3zarr': Custom S3 Zarr mirror
+            - 'openmeteo': Open-Meteo REST API (fastest, surface 1940+, plev 2022+)
+            - 'openmeteo_s3': Open-Meteo S3 direct (.om files, no rate limits,
+              surface only, exact 0.25° grid, use for large regions)
         **kwargs: Passed to the backend constructor.
 
     Returns:
