@@ -18,7 +18,7 @@ Different NWP data sources have different:
 - **Resolutions** (ERA5 31km, Open-Meteo 9km precip, CMIP6 ~100km)
 
 nwp-downloader abstracts these differences and provides:
-- Unified API per domain: `nwp_downloader.era5`, `nwp_downloader.forecast`, `nwp_downloader.cmip6`
+- Unified API per domain: `nwp_downloader.reanalysis`, `nwp_downloader.forecast`, `nwp_downloader.cmip6`
 - Consistent output: standardized variable names, dimensions, units
 - Bbox/time subsetting at source (efficient, no full-globe downloads)
 - **Variable-dependent source selection** (e.g., 9km precip from Open-Meteo, rest from ERA5)
@@ -29,15 +29,23 @@ nwp-downloader abstracts these differences and provides:
 
 ```
 nwp_downloader/
-├── era5/           # ERA5 reanalysis (1940-present, 5-day delay)
+├── reanalysis/     # ERA5 reanalysis (1940-present, 5-day delay)
 │   ├── loader.py   # ERA5Loader
 │   └── backends/   # google, cds, s3zarr, openmeteo
+│       ├── google.py
+│       ├── cds.py
+│       ├── s3zarr.py
+│       └── openmeteo.py
 ├── forecast/       # IFS/HRES operational forecasts (10-day ahead)
 │   ├── loader.py   # ForecastLoader
 │   └── backends/   # ecmwf_opendata, openmeteo_ifs
+│       ├── ecmwf_opendata.py
+│       └── openmeteo.py
 ├── cmip6/          # Climate projections (future)
 │   ├── loader.py   # CMIP6Loader
 │   └── backends/   # esgf, google_cmip6
+│       ├── esgf.py
+│       └── google_cmip6.py
 ├── preprocess/     # Transform raw downloads → simulation-ready
 │   ├── __init__.py
 │   ├── validate.py # Range checks, missing data detection
@@ -51,7 +59,7 @@ nwp_downloader/
 └── __init__.py
 ```
 
-Each module (era5, forecast, cmip6) is a self-contained domain with its own loader and backends, sharing common utilities.
+Each module (reanalysis, forecast, cmip6) is a self-contained domain with its own loader and backends, sharing common utilities.
 
 The `preprocess` module transforms raw downloads into simulation-ready datasets.
 
@@ -74,7 +82,7 @@ For snow/hydrology applications, 9km precipitation is a **big win** (4x resoluti
 ### Proposed API
 
 ```python
-from nwp_downloader.era5 import ERA5Loader
+from nwp_downloader.reanalysis import ERA5Loader
 
 loader = ERA5Loader(
     bbox=(7.7, 45.95, 7.85, 46.05),
@@ -129,12 +137,13 @@ loader = ERA5Loader(
 
 ### Components
 
-| Component | Responsibility |
-|-----------|---------------|
-| `ERA5Loader` | Orchestration: build date list, parallel fetch, derived variable computation, write coordination |
-| `ERA5Backend` (abstract) | Fetch one day of data from a specific source, return standardized `(ds_surf, ds_plev)` |
-| `Writer` | Persist data to disk (NetCDF daily/yearly or Zarr append) |
-| `IFSForecastLoader` | Separate loader for IFS open data forecasts (different data structure, GRIB input) |
+| Component | Module | Responsibility |
+|-----------|--------|---------------|
+| `ERA5Loader` | `reanalysis` | Orchestration: build date list, parallel fetch, derived variable computation, write coordination |
+| `ERA5Backend` (abstract) | `reanalysis` | Fetch one day of data from a specific source, return standardized `(ds_surf, ds_plev)` |
+| `ForecastLoader` | `forecast` | Orchestration: backend selection, fallback, backfill, Zarr output |
+| `ForecastBackend` (abstract) | `forecast` | Fetch one forecast run, return `(ds_surf, ds_plev)` with valid_time dimension |
+| `Writer` | `common` | Persist data to disk (Zarr append) |
 
 ---
 
@@ -313,17 +322,135 @@ Raw Download → Validate → Derive → Conventions → Chunk → Ready Zarr
 
 ---
 
-## IFSForecastLoader
+## Forecast Module
 
-Separate class for ECMWF IFS open data forecasts:
+The `nwp_downloader.forecast` module provides unified access to IFS forecast data from multiple backends.
 
-- Downloads via `ecmwf.opendata` client
-- GRIB format → requires cfgrib
-- 10-day forecast (steps 0-240h)
-- Deaccumulates/reaccumulates radiation and precip
-- Interpolates from 3h/6h native resolution to 1h
+### Architecture
 
-**[QUESTION 6]:** Should `IFSForecastLoader` follow the same Backend/Writer pattern as `ERA5Loader`, or is the separate class approach correct given the different data structure?
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                       ForecastLoader                             │
+│  (orchestrator: backend selection, fallback, Zarr output)        │
+└─────────────────────────┬───────────────────────────────────────┘
+                          │
+            ┌─────────────┴─────────────┐
+            │                           │
+            ▼                           ▼
+┌──────────────────────┐     ┌──────────────────────┐
+│ ECMWFOpenDataBackend │     │ OpenMeteoIFSBackend  │
+│    (GRIB via API)    │     │   (REST/JSON API)    │
+└──────────────────────┘     └──────────────────────┘
+            │                           │
+            └─────────────┬─────────────┘
+                          ▼
+                   ┌─────────────┐
+                   │ forecast.zarr│
+                   └─────────────┘
+```
+
+### Key Differences from Reanalysis
+
+| Aspect | Reanalysis | Forecast |
+|--------|------------|----------|
+| Time dimension | `time` (analysis time) | `valid_time` (forecast valid time) |
+| Additional coord | — | `init_time` (forecast initialization) |
+| Typical use | Historical | Operational/near-real-time |
+| Backend output | Single day | Full 10-day forecast |
+
+### API
+
+```python
+from nwp_downloader.forecast import ForecastLoader
+
+loader = ForecastLoader(
+    bbox=(7.7, 45.95, 7.85, 46.05),
+    output_dir="./forecast/",
+    backend="auto",  # or "ecmwf_opendata", "openmeteo_ifs"
+    priority_strategy="speed",  # or "reliability"
+    output_timestep="1H",  # "1H", "2H", or "3H"
+    pressure_levels=[1000, 850, 700, 500, 300],
+    required_variables=["strd", "q"],  # forces ECMWF backend
+)
+
+# Download (with automatic backfill)
+loader.download(backfill_days=3)
+
+# Open lazy dataset
+ds = loader.open()  # Returns xr.Dataset from forecast.zarr
+```
+
+### Backend Selection
+
+```
+If required_variables include blacklisted vars (strd, q):
+    → ecmwf_opendata (only source for these)
+If priority_strategy == "speed":
+    → openmeteo_ifs (faster API)
+If priority_strategy == "reliability":
+    → ecmwf_opendata (official source)
+On failure: automatic fallback to alternate backend
+```
+
+### Backends
+
+| Backend | Source | Format | Speed | Variables |
+|---------|--------|--------|-------|-----------|
+| `ecmwf_opendata` | ECMWF Open Data | GRIB | ~1-2 min | All IFS vars |
+| `openmeteo_ifs` | Open-Meteo Historical | JSON | ~10s | No strd, q |
+
+### Variable Blacklist
+
+The following variables should **never** come from OpenMeteo IFS (see `backend-priority.md`):
+- `strd` (downward LW radiation) — not available
+- `q` (specific humidity) — not available
+- `u`, `v` (pressure level wind) — resolution artifacts
+
+### ForecastBackend ABC
+
+```python
+class ForecastBackend(ABC):
+    """Abstract base class for forecast backends."""
+
+    @abstractmethod
+    def fetch_forecast(self, init_time: datetime) -> tuple[xr.Dataset, xr.Dataset]:
+        """Fetch forecast data for a single initialization time.
+
+        Returns:
+            Tuple of (ds_surface, ds_pressure_level) with valid_time dimension.
+        """
+        pass
+
+    @property
+    @abstractmethod
+    def forecast_horizon_hours(self) -> int:
+        """Maximum forecast lead time in hours."""
+        pass
+
+    @property
+    @abstractmethod
+    def available_init_times(self) -> list[int]:
+        """Available forecast initialization hours (UTC)."""
+        pass
+```
+
+### Output Format
+
+Forecasts are stored in Zarr with `valid_time` as the primary time dimension:
+
+```
+forecast.zarr/
+  valid_time/    # Forecast valid times
+  init_time/     # Forecast initialization time (scalar coord per forecast)
+  latitude/
+  longitude/
+  level/         # Pressure levels (plev data only)
+  t2m/           # Surface variables
+  tp/
+  z/             # Pressure level variables
+  t/
+  ...
+```
 
 ---
 
@@ -349,7 +476,7 @@ Separate class for ECMWF IFS open data forecasts:
 ### Size-Aware Loading
 
 ```python
-from nwp_downloader.era5 import ERA5Loader
+from nwp_downloader.reanalysis import ERA5Loader
 
 loader = ERA5Loader(
     bbox=(7.7, 45.95, 7.85, 46.05),
@@ -424,7 +551,7 @@ TPS2 then:
 | 3 | Daily files: delete after yearly merge? | **Decided: No daily files. Single Zarr store.** |
 | 4 | Zarr pass-through mode (no local cache)? | **Decided: Local Zarr cache is default. Direct cloud read possible but not primary mode.** |
 | 5 | Derived variables: here or in consumer? | **Decided: in downloader (preprocess module)** |
-| 6 | IFSForecastLoader: separate class or unified pattern? | **Decided: separate module** (`nwp_downloader.forecast`) |
+| 6 | ForecastLoader: separate class or unified pattern? | **Decided: separate module** (`nwp_downloader.forecast`) with `ForecastBackend` ABC |
 | 7 | Scope boundary: any operations to add/remove? | **Decided: confirmed, units at output writers** |
 | 8 | Streaming API (return dataset, no disk write)? | **Decided: Hybrid. `fetch()` for small jobs, `open()` returns lazy handle to local Zarr for large jobs.** |
 | 9 | Rename package for non-ECMWF sources? | **Decided: yes, `nwp-downloader`** |
@@ -433,7 +560,7 @@ TPS2 then:
 ## Decisions Made
 
 1. **Package name:** `nwp-downloader` (not ECMWF-specific)
-2. **Module structure:** One module per domain (`era5`, `forecast`, `cmip6`)
+2. **Module structure:** One module per domain (`reanalysis`, `forecast`, `cmip6`)
 3. **Variable-dependent sources:** Supported (e.g., 9km precip from Open-Meteo)
 4. **Coordinate alignment:** None - return separate datasets per source, consumer (TPS2) handles point-based interpolation
 5. **Output format:** Always Zarr (convert NetCDF/GRIB sources to Zarr)
