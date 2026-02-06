@@ -290,8 +290,10 @@ ERA5Loader(
 
 | Strategy | Priority Order | Use Case |
 |----------|---------------|----------|
-| `speed` (default) | openmeteo > google > cds | Operational, large jobs |
-| `reliability` | google > s3zarr > cds > openmeteo | Research, variable completeness |
+| `speed` (default) | **s3zarr*** > openmeteo > google > cds | Operational, large jobs |
+| `reliability` | **s3zarr*** > google > cds > openmeteo | Research, variable completeness |
+
+*s3zarr always wins when bbox fits — it's both fast AND reliable (pre-subset, complete variables).
 
 **Default: `speed`** — 10-30x faster for most jobs, with automatic fallback when variables missing (strd, q, u/v on plev).
 
@@ -312,15 +314,6 @@ nwp:
 | 2022+ | no | **OM ERA5** (~0.4s/day) | Google (~14s/day) | CDS (queued) |
 | 1940-2021 | yes | **Google** (~14s/day) | CDS (queued) | - |
 | 1940-2021 | no | **OM ERA5** (~0.4s/day) | Google (~14s/day) | CDS (queued) |
-
-### Regional Override
-
-When bbox fits within a regional source's coverage, prefer the regional source:
-
-```
-if bbox_within(request.bbox, s3zarr.bbox) and time_within(request.time, s3zarr.time_range):
-    priority.insert(0, "s3zarr")  # Pre-subset = fastest
-```
 
 ---
 
@@ -430,16 +423,18 @@ Stick with ERA5 (31km). Cloud effects dominate; resolution less important.
 ```
 given: start_date, end_date, required_variables, bbox, priority_strategy="speed"
 
-0. Set base priority order from strategy
+0. Check regional source FIRST (always wins when available)
+   if bbox_within(bbox, s3zarr.bbox) and time_within([start, end], s3zarr.time_range):
+       use s3zarr  # Fast + reliable + complete variables
+       return
+
+1. Set fallback priority order from strategy
    if priority_strategy == "speed":
        base_order = [openmeteo, google, cds]
    else:  # reliability
-       base_order = [google, s3zarr, cds, openmeteo]
+       base_order = [google, cds, openmeteo]
 
-1. Check regional source applicability
-   if bbox_within(bbox, s3zarr.bbox) and time_within([start, end], s3zarr.time_range):
-       regional_available = True
-       # S3 Zarr becomes top priority
+2. Check for blacklisted variables (skip to next section)
 
 2. Determine if pressure levels are needed
    plev_needed = any variable in {t, z, u, v, r, q} is required
@@ -461,7 +456,7 @@ given: start_date, end_date, required_variables, bbox, priority_strategy="speed"
        try s3zarr
        # Fall through if fails
 
-   # Check for blacklisted variables that force Google/CDS
+3. Check for blacklisted variables that force Google/CDS
    blacklisted_vars = {"u", "v", "q", "strd"} & set(required_variables)
    if blacklisted_vars:
        # Must use Google/CDS for these — OpenMeteo has errors or missing
@@ -469,7 +464,8 @@ given: start_date, end_date, required_variables, bbox, priority_strategy="speed"
        fallback: cds
        # Note: Can still fetch tp separately from OM IFS for 9km precip
 
-   elif era == "post2022" and plev_needed:
+4. Apply priority strategy
+   if era == "post2022" and plev_needed:
        try openmeteo model=ifs
        fallback: google
        fallback: cds
