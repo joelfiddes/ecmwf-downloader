@@ -279,19 +279,30 @@ notes: Cloud-optimized Zarr, faster than ESGF for supported models
 
 ## Priority Logic
 
-### CONFLICT: Speed vs Reliability
+### Configuration: `priority_strategy`
 
-**Two valid strategies exist:**
+```python
+ERA5Loader(
+    priority_strategy="speed",  # or "reliability"
+    ...
+)
+```
 
-1. **Speed-first** (current implementation): `openmeteo > google > cds`
-   - Pro: 10-30x faster for simple jobs
-   - Con: Missing variables (strd, q), DEM-based z not model terrain
+| Strategy | Priority Order | Use Case |
+|----------|---------------|----------|
+| `speed` (default) | openmeteo > google > cds | Operational, large jobs |
+| `reliability` | google > s3zarr > cds > openmeteo | Research, variable completeness |
 
-2. **Reliability-first** (proposed): `google > s3zarr > cds > openmeteo`
-   - Pro: Complete variable set, consistent source
-   - Con: Slower
+**Default: `speed`** — 10-30x faster for most jobs, with automatic fallback when variables missing (strd, q, u/v on plev).
 
-**Current recommendation:** Speed-first for operational use, with automatic fallback when variables missing.
+```yaml
+# Config file example
+nwp:
+  priority_strategy: speed  # or "reliability"
+
+  # Override for specific jobs needing all variables
+  # priority_strategy: reliability
+```
 
 ### Priority Table (Speed-First)
 
@@ -417,7 +428,13 @@ Stick with ERA5 (31km). Cloud effects dominate; resolution less important.
 ## Decision Logic
 
 ```
-given: start_date, end_date, required_variables, bbox
+given: start_date, end_date, required_variables, bbox, priority_strategy="speed"
+
+0. Set base priority order from strategy
+   if priority_strategy == "speed":
+       base_order = [openmeteo, google, cds]
+   else:  # reliability
+       base_order = [google, s3zarr, cds, openmeteo]
 
 1. Check regional source applicability
    if bbox_within(bbox, s3zarr.bbox) and time_within([start, end], s3zarr.time_range):
@@ -569,9 +586,25 @@ Falling back to google... [SUCCESS]
 
 ## Configuration Examples
 
-### Basic (single source)
+### Default (speed priority)
 ```python
-ERA5Loader(backend="google", ...)
+ERA5Loader(
+    priority_strategy="speed",  # Default - fastest source first
+    ...
+)
+```
+
+### Reliability priority
+```python
+ERA5Loader(
+    priority_strategy="reliability",  # Google first, complete variables
+    ...
+)
+```
+
+### Explicit backend (bypass priority logic)
+```python
+ERA5Loader(backend="google", ...)  # Force specific backend
 ```
 
 ### High-res precipitation
