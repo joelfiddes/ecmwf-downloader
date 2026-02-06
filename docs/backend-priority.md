@@ -23,10 +23,10 @@
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│ USE OpenMeteo S3 WHEN:                                                      │
+│ USE OpenMeteo S3 ONLY WHEN:                                                 │
 │   - Exact 0.25° grid alignment required (API returns off-grid coords)      │
-│   - Google unavailable AND API would hit rate limits                        │
-│   - Note: S3 is SLOWER than Google for large regions (per-file overhead)   │
+│   - Google unavailable                                                      │
+│   - ⚠️ S3 is 3-4x SLOWER than Google even for surface-only fetching       │
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -39,13 +39,14 @@
 
 ### Benchmark Results (2026-02-06)
 
-| Scenario | Google | OpenMeteo S3 | Hybrid | Winner |
-|----------|--------|--------------|--------|--------|
-| Small (25 pts, 3 days) | 44.7s | 13.2s (surf) | 40.8s | Hybrid 1.1x |
-| Large (861 pts, 2 days) | 26.5s | 149.1s (surf) | 162.3s | **Google 6x** |
+| Scenario | Google | OpenMeteo S3 | Winner |
+|----------|--------|--------------|--------|
+| Small region (25 pts, 3 days) | 44.7s | 13.2s | S3 faster |
+| Large region (861 pts, 2 days) | 26.5s | 149.1s | **Google 6x faster** |
+| Surface-only, medium region (14 days) | 6.2s/day | 23.9s/day | **Google 4x faster** |
 
-**Key insight:** Google ARCO scales better with region size. S3 has per-file connection
-overhead that hurts large regions. Use Google as default, S3 only for grid alignment.
+**Key insight:** Google ARCO is faster across the board. S3 has ~4-5s per-variable
+connection overhead that dominates even for surface-only fetching. **Use Google as default.**
 
 ---
 
@@ -364,20 +365,25 @@ ERA5Loader(
 
 ### When to Use Hybrid Mode
 
-Hybrid mode (S3 surface + Google plev) is **only beneficial when**:
+**⚠️ Generally NOT recommended.** Google ARCO is faster in almost all scenarios.
+
+Hybrid mode (S3 surface + Google plev) may be beneficial when:
 
 1. **Exact 0.25° grid alignment required** — OpenMeteo API returns off-grid coords
 2. **9km IFS precipitation needed** — genuine high-res precip (2022+)
 3. **Google unavailable** and API would hit rate limits
 
-**⚠️ Benchmark warning:** Hybrid is actually SLOWER for large regions:
-- Small region (25 pts): Hybrid 1.1x faster than Google
-- Large region (861 pts): Google **6x faster** than Hybrid
+**⚠️ Benchmark results show Google is faster:**
+- Small region: Hybrid is marginally faster for first request only
+- Large region: Google **6x faster** than Hybrid
+- Surface-only: Google **3-4x faster** than S3
 
 ### Why NOT Hybrid by Default?
 
-OpenMeteo S3 has per-file connection overhead (~4-5s per variable file). For large
-regions, this overhead dominates and Google's Zarr-based access is much faster.
+OpenMeteo S3 has per-file connection overhead (~4-5s per variable file). Even for
+surface-only fetching, this overhead makes S3 ~4x slower than Google's Zarr access.
+The overhead does not amortize over more days — S3 stays at ~23-25s/day while
+Google drops from 8s to 6s/day with longer time periods.
 
 ### Single Mode
 
@@ -634,22 +640,22 @@ q = 0.622 * e / (p - 0.378 * e)
 | OpenMeteo API | 0.2s (0.1s/day) | Rate limited | Surface only, fast |
 | Hybrid (S3+Google) | 40.8s (13.6s/day) | 162.3s (81.1s/day) | Two fetches overhead |
 
-### Time Scaling (Switzerland, small region, 1 plev)
+### Time Scaling — Fair Surface-Only Comparison
 
-| Days | Google | Google/day | S3 | S3/day |
-|------|--------|------------|-------|--------|
-| 1 | 13.6s | 13.6s | 5.1s | 5.1s |
-| 3 | 24.1s | 8.0s | 11.9s | 4.0s |
-| 7 | 50.9s | 7.3s | 26.9s | 3.8s |
-| 14 | 94.9s | 6.8s | 53.3s | 3.8s |
+Western Alps region (~5° x 3°), surface variables only, same 6 vars both backends:
+
+| Days | Google Total | Google/day | S3 Total | S3/day | Winner |
+|------|--------------|------------|----------|--------|--------|
+| 1 | 8.2s | 8.2s | 24.8s | 24.8s | Google 3.0x faster |
+| 7 | 46.6s | 6.7s | 163.5s | 23.4s | Google 3.5x faster |
+| 14 | 86.6s | 6.2s | 334.4s | 23.9s | Google 3.9x faster |
 
 **Key insights:**
-- Both have startup overhead (store/connection setup on first request)
-- Sub-linear scaling: per-day cost decreases with more days
-- Google: 13.6s → 6.8s/day (amortized)
-- S3: 5.1s → 3.8s/day (amortized)
-- S3 wins for small regions with multiple days
-- Google wins for large regions regardless of time period
+- **Google is 3-4x faster than S3** even for surface-only fetching
+- **Google benefits from amortization**: startup overhead spreads over more days (8.2s → 6.2s/day)
+- **S3 has constant per-day cost**: ~23-25s/day regardless of period length
+- S3's per-file connection overhead (~4-5s per variable) dominates
+- **Conclusion: Google ARCO is the best default for all scenarios**
 
 ### Regional Archive (Central Asia)
 
