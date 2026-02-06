@@ -1,8 +1,286 @@
 # Backend Priority and Source Selection
 
-Strategy: try the fastest source first, fall back if a required variable or time range is unavailable. Longwave radiation (`strd`) can be computed from temperature and humidity when not available from the source.
+> **This document governs backend/source selection logic in nwp-downloader.**
+> Code should implement these rules. Update this doc as priorities evolve.
 
-## Priority Table
+---
+
+## Source Definitions
+
+Formal definitions for each NWP source, organized by module.
+
+---
+
+### Reanalysis Sources (`nwp_downloader.era5`)
+
+#### Global
+
+| Source | ID | Resolution | Temporal Coverage | Endpoint | Auth |
+|--------|-----|------------|-------------------|----------|------|
+| Google ARCO-ERA5 | `google` | 31 km | 1940-present | `gs://gcp-public-data-arco-era5` | Anonymous |
+| CDS (Copernicus) | `cds` | 31 km | 1940-present | `cds.climate.copernicus.eu` | API key |
+| OpenMeteo ERA5 | `openmeteo` | 31 km | 1940-present | `archive-api.open-meteo.com` | Anonymous |
+| OpenMeteo ERA5-Land | `openmeteo_era5land` | **9 km** | 1950-present | `archive-api.open-meteo.com` | Anonymous |
+
+#### Regional
+
+| Source | ID | Resolution | Spatial Coverage | Temporal Coverage | S3 URL | Auth |
+|--------|-----|------------|------------------|-------------------|--------|------|
+| Switch S3 (Central Asia) | `s3zarr` | 31 km | 59-81°E, 32-45°N | 2000-2023 | `s3://spi-pamir-c7-sdsc/era5_data/central_asia.zarr/` | S3 keys |
+
+**Regional sources are preferred when bbox fits within coverage** - faster, pre-subset.
+
+---
+
+### Forecast Sources (`nwp_downloader.forecast`)
+
+| Source | ID | Resolution | Temporal Coverage | Endpoint | Auth |
+|--------|-----|------------|-------------------|----------|------|
+| ECMWF OpenData | `ecmwf_opendata` | 9 km | present-3d → present+10d | `data.ecmwf.int` | Anonymous |
+| OpenMeteo IFS | `openmeteo_ifs` | 9 km | present → present+16d | `api.open-meteo.com` | Anonymous |
+
+**Note:** OpenMeteo IFS also provides historical data back to 2022, but for historical reanalysis use the ERA5 module instead.
+
+---
+
+### Climate Projection Sources (`nwp_downloader.cmip6`) — Future
+
+| Source | ID | Resolution | Temporal Coverage | Endpoint | Auth | Status |
+|--------|-----|------------|-------------------|----------|------|--------|
+| ESGF | `esgf` | ~100 km | 1850-2100 | `esgf-node.llnl.gov` | OpenID | Planned |
+| Google CMIP6 | `google_cmip6` | ~100 km | 1850-2100 | `gs://cmip6` | Anonymous | Planned |
+
+**Variables:** tas, pr, hurs, rsds, rlds, sfcWind, ps, ...
+
+**Scenarios:** historical, ssp126, ssp245, ssp370, ssp585
+
+**Models:** Priority list TBD (e.g., EC-Earth3, MPI-ESM1-2-HR, UKESM1-0-LL, GFDL-ESM4)
+
+---
+
+## Detailed Source Specifications
+
+### Reanalysis (`nwp_downloader.era5`)
+
+#### `google` — Google ARCO-ERA5
+
+```yaml
+id: google
+type: reanalysis
+product: ERA5
+endpoint: gs://gcp-public-data-arco-era5/raw/
+format: NetCDF (via GCS)
+resolution_km: 31
+bbox: [-180, -90, 180, 90]  # Global
+time_range: [1940-01-01, present - 5 days]
+variables:
+  surface: [t2m, d2m, sp, z, ssrd, strd, tp, u10, v10, msl]
+  pressure: [t, z, u, v, q, r]
+  levels: [300, 500, 700, 850, 1000]
+auth: anonymous
+latency: ~14s/day
+notes: Full ERA5 mirror, reliable, complete variable set
+```
+
+#### `cds` — Copernicus Climate Data Store
+
+```yaml
+id: cds
+type: reanalysis
+product: ERA5
+endpoint: https://cds.climate.copernicus.eu/api/v2
+format: NetCDF (download)
+resolution_km: 31
+bbox: [-180, -90, 180, 90]  # Global
+time_range: [1940-01-01, present - 5 days]
+variables:
+  surface: [all ERA5 variables]
+  pressure: [all ERA5 variables]
+  levels: [all 37 levels]
+auth:
+  type: api_key
+  env_var: CDSAPI_KEY
+  config_file: ~/.cdsapirc
+latency: 30-60s/day (queue dependent)
+notes: Authoritative source, full variable set, but slow due to queues
+```
+
+#### `s3zarr` — Switch S3 Central Asia Archive
+
+```yaml
+id: s3zarr
+type: reanalysis
+product: ERA5 (pre-subset)
+endpoint: https://os.zhdk.cloud.switch.ch
+bucket: spi-pamir-c7-sdsc
+zarr_path: era5_data/central_asia.zarr/
+full_url: s3://spi-pamir-c7-sdsc/era5_data/central_asia.zarr/
+format: Zarr
+resolution_km: 31
+bbox: [59, 32, 81, 45]  # Central Asia: west, south, east, north
+time_range: [2000-01-01, 2023-12-31]  # Approximate - confirm exact range
+variables:
+  surface: [t2m, d2m, sp, z_surf, ssrd, strd, tp]
+  pressure: [t, z, u, v, q]
+  levels: [300, 500, 700, 850, 1000]
+auth:
+  type: s3
+  env_vars: [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
+  endpoint_url: https://os.zhdk.cloud.switch.ch
+  env_file: /Users/joel/src/era5google/env  # Local reference
+latency: ~5s/day (pre-subset, fast)
+notes: Regional archive, preferred when bbox fits, requires S3 credentials
+```
+
+#### `openmeteo` — Open-Meteo ERA5 API
+
+```yaml
+id: openmeteo
+type: reanalysis
+product: ERA5
+endpoint: https://archive-api.open-meteo.com/v1/archive
+format: REST/JSON
+resolution_km: 31
+bbox: [-180, -90, 180, 90]  # Global
+time_range: [1940-01-01, present - 5 days]
+variables:
+  surface: [t2m, d2m, sp, ssrd, tp, u10, v10]  # No strd!
+  pressure: [t, z, u, v, r]  # No q - has r instead
+  levels: [300, 500, 700, 850, 1000]
+auth: anonymous
+latency: ~0.4s/day (surface only)
+notes: Very fast, but missing strd and q. Uses DEM elevation not model terrain for z.
+```
+
+#### `openmeteo_era5land` — Open-Meteo ERA5-Land API
+
+```yaml
+id: openmeteo_era5land
+type: reanalysis
+product: ERA5-Land
+endpoint: https://archive-api.open-meteo.com/v1/archive
+format: REST/JSON
+resolution_km: 9
+bbox: [-180, -90, 180, 90]  # Global
+time_range: [1950-01-01, present - 5 days]
+variables:
+  surface: [t2m, tp]  # Limited to land surface variables
+  pressure: []  # No pressure levels
+  levels: []
+auth: anonymous
+latency: ~0.5s/day
+notes: 9km resolution for precip/temp - big win for snow/hydro applications
+```
+
+---
+
+### Forecast (`nwp_downloader.forecast`)
+
+#### `openmeteo_ifs` — Open-Meteo IFS API
+
+```yaml
+id: openmeteo_ifs
+type: forecast
+product: IFS (derivative)
+endpoint: https://api.open-meteo.com/v1/forecast
+format: REST/JSON
+resolution_km: 9
+bbox: [-180, -90, 180, 90]  # Global
+time_range: [2022-01-01, present + 16 days]  # Historical + forecast
+variables:
+  surface: [t2m, d2m, sp, ssrd, tp, u10, v10]
+  pressure: [t, z, u, v, r]  # No q
+  levels: [300, 500, 700, 850, 1000]
+auth: anonymous
+latency: ~1s/day
+notes: Fast, 2022+ only. Wind differs significantly from Google/CDS at coarse resolution.
+```
+
+#### `ecmwf_opendata` — ECMWF Open Data (IFS Forecasts)
+
+```yaml
+id: ecmwf_opendata
+type: forecast
+product: IFS HRES
+endpoint: https://data.ecmwf.int/forecasts/
+format: GRIB
+resolution_km: 9
+bbox: [-180, -90, 180, 90]  # Global
+time_range: [present - 3 days, present + 10 days]
+variables:
+  surface: [t2m, d2m, sp, ssrd, strd, tp, u10, v10]
+  pressure: [t, z, u, v, q]
+  levels: [300, 500, 700, 850, 1000]
+auth: anonymous
+latency: ~30s/forecast
+notes: Official IFS forecasts, GRIB format requires cfgrib
+```
+
+---
+
+### Climate Projections (`nwp_downloader.cmip6`) — Planned
+
+#### `esgf` — Earth System Grid Federation
+
+```yaml
+id: esgf
+type: projection
+product: CMIP6
+endpoint: https://esgf-node.llnl.gov/esg-search/search
+format: NetCDF
+resolution_km: ~100 (model dependent)
+bbox: [-180, -90, 180, 90]  # Global
+time_range: [1850-01-01, 2100-12-31]  # Scenario dependent
+variables:
+  # CMIP6 variable names differ from ERA5
+  surface: [tas, pr, hurs, rsds, rlds, sfcWind, ps]
+  pressure: [ta, zg, ua, va, hur]
+  levels: [85000, 70000, 50000, 30000]  # Pa, not hPa
+auth:
+  type: openid
+  provider: esgf
+scenarios: [historical, ssp126, ssp245, ssp370, ssp585]
+models: TBD  # Priority models to support
+status: planned
+notes: Requires variable name mapping to ERA5 conventions
+```
+
+#### `google_cmip6` — Google Cloud CMIP6 Mirror
+
+```yaml
+id: google_cmip6
+type: projection
+product: CMIP6
+endpoint: gs://cmip6/
+format: Zarr
+resolution_km: ~100 (model dependent)
+bbox: [-180, -90, 180, 90]  # Global
+time_range: [1850-01-01, 2100-12-31]
+variables: [same as esgf]
+auth: anonymous
+status: planned
+notes: Cloud-optimized Zarr, faster than ESGF for supported models
+```
+
+---
+
+## Priority Logic
+
+### CONFLICT: Speed vs Reliability
+
+**Two valid strategies exist:**
+
+1. **Speed-first** (current implementation): `openmeteo > google > cds`
+   - Pro: 10-30x faster for simple jobs
+   - Con: Missing variables (strd, q), DEM-based z not model terrain
+
+2. **Reliability-first** (proposed): `google > s3zarr > cds > openmeteo`
+   - Pro: Complete variable set, consistent source
+   - Con: Slower
+
+**Current recommendation:** Speed-first for operational use, with automatic fallback when variables missing.
+
+### Priority Table (Speed-First)
 
 | Time range | Need plev? | Priority 1 | Priority 2 | Priority 3 |
 |------------|-----------|------------|------------|------------|
@@ -11,23 +289,36 @@ Strategy: try the fastest source first, fall back if a required variable or time
 | 1940-2021 | yes | **Google** (~14s/day) | CDS (queued) | - |
 | 1940-2021 | no | **OM ERA5** (~0.4s/day) | Google (~14s/day) | CDS (queued) |
 
+### Regional Override
+
+When bbox fits within a regional source's coverage, prefer the regional source:
+
+```
+if bbox_within(request.bbox, s3zarr.bbox) and time_within(request.time, s3zarr.time_range):
+    priority.insert(0, "s3zarr")  # Pre-subset = fastest
+```
+
+---
+
 ## Variable Source Map
 
 Each variable lists the preferred source in priority order.
 
-### Surface
+### Surface Variables
 
 | Variable | Description | Source priority | Notes |
 |----------|-------------|----------------|-------|
-| t2m | 2m temperature | OM > Google > CDS | All sources, OM fastest |
+| t2m | 2m temperature | OM > Google > CDS | All sources |
 | d2m | 2m dewpoint | OM > Google > CDS | All sources |
 | sp | Surface pressure | OM > Google > CDS | All sources |
-| ssrd | Shortwave radiation | OM > Google > CDS | All sources; OM sums hourly values per timestep |
-| tp | Precipitation | OM > Google > CDS | All sources |
-| z | Surface geopotential | Google > CDS > OM | OM uses DEM elevation not model terrain; use Google/CDS if model terrain needed |
-| strd | Longwave radiation | Google > CDS > **compute** | Not on OM; compute from t2m, d2m, cloud cover |
+| ssrd | Shortwave radiation | OM > Google > CDS | OM sums hourly values per timestep |
+| tp | Precipitation | **OM ERA5-Land (9km)** > OM > Google > CDS | 9km preferred for snow/hydro |
+| z | Surface geopotential | Google > CDS > OM | OM uses DEM not model terrain |
+| strd | Longwave radiation | Google > CDS > **compute** | Not on OM; compute from t2m, d2m |
+| u10 | 10m U wind | OM > Google > CDS | All sources |
+| v10 | 10m V wind | OM > Google > CDS | All sources |
 
-### Pressure levels
+### Pressure Level Variables
 
 | Variable | Description | Source priority (2022+) | Source priority (pre-2022) |
 |----------|-------------|------------------------|---------------------------|
@@ -38,29 +329,81 @@ Each variable lists the preferred source in priority order.
 | r | Relative humidity | OM IFS > Google > CDS | Google > CDS |
 | q | Specific humidity | Google > CDS | Google > CDS |
 
-Notes on pressure-level wind: OM IFS wind shows large differences vs ECMWF open data (~300% relative for u) due to 9km vs 25km resolution. For applications sensitive to wind accuracy at 0.25 deg, prefer Google/CDS. For applications that benefit from higher resolution wind fields, OM IFS may be preferable.
+**Wind note:** OM IFS wind shows large differences vs ECMWF (~300% relative for u) due to 9km vs 25km resolution. For wind-sensitive applications at 0.25°, prefer Google/CDS.
+
+---
+
+## Variable-Specific Source Preferences (Resolution)
+
+### Precipitation (`tp`) — 9km Available
+
+| Source | Resolution | Recommendation |
+|--------|------------|----------------|
+| ERA5 (Google/CDS) | 31 km | Default |
+| ERA5-Land (OpenMeteo) | **9 km** | **Preferred for snow/hydro applications** |
+
+```python
+source_map = {
+    "default": "google",
+    "tp": "openmeteo_era5land",  # 4x resolution improvement
+}
+```
+
+**When to use 9km precip:**
+- Snow modeling (spatial variability matters)
+- Hydrological modeling (catchment-scale)
+- Complex terrain (Alps, Himalaya, Andes)
+
+**When 31km is fine:**
+- Large-scale climate analysis
+- Flat terrain
+- Computational constraints
+
+### Temperature (`t2m`)
+
+ERA5-Land also has 9km temperature, but benefit is smaller than precip.
+Consider for high-altitude sites where lapse rate interpolation is insufficient.
+
+### Wind (`u10`, `v10`)
+
+Stick with ERA5 (31km). Wind is already heavily parameterized;
+higher resolution doesn't necessarily mean more accurate.
+
+### Radiation (`ssrd`, `strd`)
+
+Stick with ERA5 (31km). Cloud effects dominate; resolution less important.
+
+---
 
 ## Decision Logic
 
 ```
-given: start_date, end_date, required_variables
+given: start_date, end_date, required_variables, bbox
 
-1. Determine if pressure levels are needed
+1. Check regional source applicability
+   if bbox_within(bbox, s3zarr.bbox) and time_within([start, end], s3zarr.time_range):
+       regional_available = True
+       # S3 Zarr becomes top priority
+
+2. Determine if pressure levels are needed
    plev_needed = any variable in {t, z, u, v, r, q} is required
 
-2. Determine time range category
+3. Determine time range category
    if start_date >= 2022-01-01:
        era = "post2022"
    else:
        era = "pre2022"
 
-3. Check if strd is required
+4. Check special variable requirements
    strd_needed = "strd" in required_variables
-
-4. Check if q is required (vs r being sufficient)
    q_needed = "q" in required_variables and "r" not sufficient
+   high_res_precip = config.get("high_res_precip", False)
 
 5. Select backend
+
+   if regional_available:
+       try s3zarr
+       # Fall through if fails
 
    if era == "post2022" and plev_needed:
        if q_needed:
@@ -84,21 +427,47 @@ given: start_date, end_date, required_variables
        fallback: google
        fallback: cds
 
-6. If strd_needed and backend is openmeteo:
-       compute strd from available variables
+6. Handle computed/missing variables
+   if strd_needed and backend is openmeteo:
+       compute strd from t2m, d2m, cloud cover
 
-7. If surface geopotential z accuracy matters:
+   if q_needed and backend has only r:
+       compute q from r, t, p
+
+7. Handle high-res precip override
+   if high_res_precip and "tp" in required_variables:
+       fetch tp separately from openmeteo_era5land (9km)
+       return as separate dataset for TPS2 to align
+
+8. Surface geopotential accuracy
+   if z accuracy matters (model terrain vs DEM):
        prefer google/cds over openmeteo
-       (OM uses 9km DEM, Google/CDS use ERA5 model terrain)
 ```
+
+---
+
+## Source Mixing Rules
+
+When using multiple sources (e.g., 9km precip + 31km temp):
+
+1. **Fetch independently** - don't try to align grids in downloader
+2. **Return as dict** - `{"google": ds_main, "openmeteo_era5land": ds_precip}`
+3. **TPS2 handles alignment** - interpolates each to unit centroids
+
+**Constraint:** All sources must cover the same time range.
+If one source has gaps, either:
+- Fill from fallback source
+- Raise error and let user decide
+
+---
 
 ## Computed Variables
 
 ### strd (longwave radiation)
 
-When `strd` is not available from the source, it can be estimated from:
+When `strd` is not available from the source (e.g., OpenMeteo), estimate from:
 - `t2m` (2m temperature)
-- `d2m` (2m dewpoint) -> vapour pressure
+- `d2m` (2m dewpoint) → vapour pressure
 - Optional: cloud fraction (improves accuracy)
 
 Common parameterisations:
@@ -110,13 +479,14 @@ These are already available in TopoPyScale's `meteo_util.py`.
 
 ### q (specific humidity)
 
-When `q` is unavailable but `r` (relative humidity) and `t` (temperature) are present on pressure levels, `q` can be computed:
+When `q` is unavailable but `r` (relative humidity) and `t` (temperature) are present:
 ```
 e_sat = 611.2 * exp(17.67 * (T - 273.15) / (T - 29.65))
 e = r/100 * e_sat
 q = 0.622 * e / (p - 0.378 * e)
 ```
-The loader already computes `r` from `q` when missing; the reverse is equally straightforward.
+
+---
 
 ## Speed Benchmarks
 
@@ -124,9 +494,95 @@ Measured on Fan Mountains bbox (68.0-69.0E, 39.0-39.8N), 3 days, 3H resolution, 
 
 | Backend | Surface only | Surface + plev | Notes |
 |---------|-------------|---------------|-------|
+| S3 Zarr | ~5 s/day | ~5 s/day | Regional, pre-subset |
 | OM ERA5 | 0.4 s/day | - | No plev available |
 | OM IFS | - | 1.0 s/day | 2022+ only |
 | Google | 14 s/day | 14 s/day | Includes plev |
-| CDS | ~30-60 s/day | ~30-60 s/day | Queue dependent |
+| CDS | 30-60 s/day | 30-60 s/day | Queue dependent |
 
-Open-Meteo pre-fetches the full date range on first call, so per-day cost is amortised. Longer ranges have even better per-day performance.
+Open-Meteo pre-fetches the full date range on first call, so per-day cost is amortised.
+
+---
+
+## Fallback Logic
+
+If preferred source fails:
+
+```
+1. Try preferred source
+2. If unavailable/error → try next in priority
+3. If all fail → raise clear error with suggestions
+```
+
+Example:
+```
+Attempting openmeteo... [FAILED: strd not available]
+Falling back to google... [SUCCESS]
+```
+
+---
+
+## Configuration Examples
+
+### Basic (single source)
+```python
+ERA5Loader(backend="google", ...)
+```
+
+### High-res precipitation
+```python
+ERA5Loader(
+    source_map={
+        "default": "google",
+        "tp": "openmeteo_era5land",
+    },
+    ...
+)
+```
+
+### Regional archive
+```python
+ERA5Loader(
+    backend="s3zarr",
+    backend_kwargs={"zarr_url": "s3://spi-pamir-c7-sdsc/era5_data/central_asia.zarr/"},
+    ...
+)
+```
+
+### Explicit fallback chain
+```python
+ERA5Loader(
+    backend_priority=["s3zarr", "google", "cds"],
+    ...
+)
+```
+
+### Offline mode (local cache only)
+```python
+ERA5Loader(
+    backend="local",  # Only read from cache, never download
+    cache_dir="./cache/",
+    ...
+)
+```
+
+---
+
+## Future Additions
+
+As new sources become available, add entries here:
+
+- [ ] ICON (DWD) - European high-res
+- [ ] GFS (NOAA) - Global, free
+- [ ] COSMO - Alpine region
+- [ ] CMIP6 - Climate projections
+- [ ] Custom user sources - local NWP output
+
+---
+
+## Changelog
+
+| Date | Change |
+|------|--------|
+| 2026-02-06 | Merged source definitions, added regional sources, 9km precip |
+| Previous | Initial version with speed-first priority |
