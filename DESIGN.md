@@ -334,7 +334,13 @@ Separate class for ECMWF IFS open data forecasts:
 3. **Quality control** - no outlier detection, gap filling
 4. **Unit conversion** - outputs in native ERA5 units (K, Pa, J/m², m)
 
-**[QUESTION 7]:** Is this boundary correct? Are there any operations that should move into or out of ecmwf-downloader?
+**[DECIDED]:** Boundary confirmed. Unit conversion happens at output writers, not in downloader or downscaling.
+
+- nwp-downloader outputs native SI units (K, Pa, J/m², m, m/s)
+- Preprocessor normalizes accumulation periods across sources
+- TPS2 downscaling passes through native SI (physics kernels are SI-native or agnostic)
+- Output writers convert to model-specific units (FSM: °C/mm, HBV: °C/mm, etc.)
+- SnowMapper handles reanalysis+forecast merge (both already in same SI units)
 
 ---
 
@@ -419,7 +425,7 @@ TPS2 then:
 | 4 | Zarr pass-through mode (no local cache)? | **Decided: Local Zarr cache is default. Direct cloud read possible but not primary mode.** |
 | 5 | Derived variables: here or in consumer? | **Decided: in downloader (preprocess module)** |
 | 6 | IFSForecastLoader: separate class or unified pattern? | **Decided: separate module** (`nwp_downloader.forecast`) |
-| 7 | Scope boundary: any operations to add/remove? | Open |
+| 7 | Scope boundary: any operations to add/remove? | **Decided: confirmed, units at output writers** |
 | 8 | Streaming API (return dataset, no disk write)? | **Decided: Hybrid. `fetch()` for small jobs, `open()` returns lazy handle to local Zarr for large jobs.** |
 | 9 | Rename package for non-ECMWF sources? | **Decided: yes, `nwp-downloader`** |
 | 10 | Variable-dependent sources: how to handle coordinate alignment? | **Decided: (c) separate datasets** |
