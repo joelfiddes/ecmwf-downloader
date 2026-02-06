@@ -327,16 +327,36 @@ Each variable lists the preferred source in priority order.
 
 ### Pressure Level Variables
 
-| Variable | Description | Source priority (2022+) | Source priority (pre-2022) |
-|----------|-------------|------------------------|---------------------------|
-| t | Temperature | OM IFS > Google > CDS | Google > CDS |
-| z | Geopotential | OM IFS > Google > CDS | Google > CDS |
-| u | U-wind | Google > CDS > OM IFS | Google > CDS |
-| v | V-wind | Google > CDS > OM IFS | Google > CDS |
-| r | Relative humidity | OM IFS > Google > CDS | Google > CDS |
-| q | Specific humidity | Google > CDS | Google > CDS |
+| Variable | Description | Source priority (2022+) | Source priority (pre-2022) | Notes |
+|----------|-------------|------------------------|---------------------------|-------|
+| t | Temperature | OM IFS > Google > CDS | Google > CDS | OM excellent (0.27% diff) |
+| z | Geopotential | OM IFS > Google > CDS | Google > CDS | OM excellent (0.22% diff) |
+| u | U-wind | **Google > CDS only** | Google > CDS | ⚠️ OM blacklisted (43 m/s error) |
+| v | V-wind | **Google > CDS only** | Google > CDS | ⚠️ OM blacklisted (28 m/s error) |
+| r | Relative humidity | Google > CDS > OM IFS | Google > CDS | OM moderate (20% diff) |
+| q | Specific humidity | **Google > CDS only** | Google > CDS | ⚠️ Not available on OM |
 
-**Wind note:** OM IFS wind shows large differences vs ECMWF (~300% relative for u) due to 9km vs 25km resolution. For wind-sensitive applications at 0.25°, prefer Google/CDS.
+---
+
+## Variable Blacklist (OpenMeteo)
+
+Based on comparison testing (see `openmeteo-comparison.md`), these variables should **NEVER** be sourced from OpenMeteo:
+
+| Variable | Source | Issue | MaxAbsDiff |
+|----------|--------|-------|------------|
+| u (plev) | OM IFS | Resolution mismatch (9km vs 25km) | **43 m/s** |
+| v (plev) | OM IFS | Resolution mismatch (9km vs 25km) | **28 m/s** |
+| strd | OM * | Not available | - |
+| q | OM * | Not available (only r) | - |
+| z (surface) | OM * | Uses different DEM, not model terrain | 12370 m²/s² |
+
+**Always use Google/CDS for:** u, v, strd, q, surface z
+
+**Safe to use from OpenMeteo:**
+- t, z on pressure levels (0.2-0.3% difference — excellent)
+- ssrd (~4% difference — good)
+- tp (negligible difference)
+- t2m, d2m, sp (if terrain differences acceptable)
 
 ---
 
@@ -418,13 +438,18 @@ given: start_date, end_date, required_variables, bbox
        try s3zarr
        # Fall through if fails
 
-   if era == "post2022" and plev_needed:
-       if q_needed:
-           use google  (OM IFS has r but not q)
-       else:
-           try openmeteo model=ifs
-           fallback: google
-           fallback: cds
+   # Check for blacklisted variables that force Google/CDS
+   blacklisted_vars = {"u", "v", "q", "strd"} & set(required_variables)
+   if blacklisted_vars:
+       # Must use Google/CDS for these — OpenMeteo has errors or missing
+       use google
+       fallback: cds
+       # Note: Can still fetch tp separately from OM IFS for 9km precip
+
+   elif era == "post2022" and plev_needed:
+       try openmeteo model=ifs
+       fallback: google
+       fallback: cds
 
    elif era == "post2022" and not plev_needed:
        try openmeteo model=era5
