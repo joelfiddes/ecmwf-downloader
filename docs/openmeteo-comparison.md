@@ -78,7 +78,7 @@ The ssrd accumulation convention is correct (ratio ~0.96, within 4%). The tp rat
 - **ecmwf-opendata only**: strd (longwave radiation), q (specific humidity)
 - **Open-Meteo only**: z (surface geopotential from DEM)
 
-## Summary
+## Summary (API)
 
 - Open-Meteo is **14-34x faster** than Google ARCO-ERA5
 - Pressure-level temperature and geopotential are virtually identical (0.2-0.3% difference)
@@ -86,3 +86,164 @@ The ssrd accumulation convention is correct (ratio ~0.96, within 4%). The tp rat
 - Radiation accumulation convention is correct after fix
 - Missing variables: strd (longwave), q (specific humidity on pressure levels)
 - Free, no credentials required
+
+---
+
+## 5. Open-Meteo S3 Direct Access
+
+An alternative to the API is direct access to `.om` files on `s3://openmeteo`. This section documents the tradeoffs.
+
+### S3 vs API vs Google Overview
+
+| Aspect | Open-Meteo API | Open-Meteo S3 | Google Cloud |
+|--------|----------------|---------------|--------------|
+| **Grid alignment** | Off-grid (~0.03-0.08°) | Exact 0.25° | Exact 0.25° |
+| **Rate limits** | 500 req/min | None | None |
+| **Surface variables** | All | Most (no strd) | All |
+| **Pressure levels** | IFS mode only (2022+) | None | All |
+| **Historical data** | 1940+ (ERA5) | 1950+ (year files) | 1940+ |
+| **Credentials** | None | None | None |
+
+### Grid Alignment Issue
+
+**Critical finding**: The API returns coordinates that do not match the standard ERA5 0.25° grid.
+
+Test request for `(60.25, 7.25)`:
+
+| Source | Returned Coordinates | Offset |
+|--------|---------------------|--------|
+| Open-Meteo S3 | (60.250000, 7.250000) | 0, 0 |
+| Google Cloud | (60.250000, 7.250000) | 0, 0 |
+| Open-Meteo API | (60.281193, 7.166276) | +0.031°, -0.084° |
+
+This ~3-8 km offset can cause issues when mixing backends or expecting standard grid alignment.
+
+### S3 Performance Benchmarks
+
+#### Small Region (Norway: 7×9 grid points, 4 variables)
+
+**S3 vs Google Cloud** (store opened once for Google):
+
+| Time Range | S3 Direct | Google Cloud | S3 Speedup |
+|------------|-----------|--------------|------------|
+| 1 day | 17.6s | 42s (+107s startup) | 2.4x |
+| 7 days | 16.1s | 71s | 4.4x |
+| 21 days | 15.3s | 163s | 10.7x |
+
+**S3 parallel fetching** (4 workers vs sequential):
+
+| Mode | Time | Speedup |
+|------|------|---------|
+| Sequential | 17.5s | 1x |
+| Parallel (4 workers) | 7.2s | 2.4x |
+
+**API vs S3** (small region, under rate limit):
+
+| Time Range | API | S3 (parallel) | Winner |
+|------------|-----|---------------|--------|
+| 6 hours | 0.13s | 5.4s | API |
+| 1 day | 0.13s | 4.1s | API |
+| 21 days | 0.60s | 4.2s | API |
+
+For small regions, the API is faster due to S3's ~4s per-file connection overhead.
+
+#### Large Region (Scandinavia: 6,213 grid points)
+
+| Backend | Result |
+|---------|--------|
+| S3 Direct | 923s (4 vars, 24h) — completed |
+| API | **429 Too Many Requests** — rate limited |
+
+For large regions, S3 is the only viable option.
+
+#### Rate Limit Calculation (Central Asia)
+
+- Bbox: 50°E-90°E, 35°N-55°N
+- Grid points: 81 × 161 = **13,041 points**
+- API requests needed: ~653 (at 20 points/batch)
+- Time at rate limit: ~78 seconds minimum
+- **Verdict**: Tight; S3 recommended for reliability
+
+### S3 Bucket Structure
+
+**Bucket**: `s3://openmeteo` (us-west-2, public, anonymous access)
+
+```
+data/
+├── copernicus_era5/              # ERA5 reanalysis
+│   ├── temperature_2m/
+│   │   ├── chunk_904.om          # Rolling ~4 years (2022+)
+│   │   └── ...chunk_975.om
+│   └── static/meta.json
+│
+├── copernicus_era5_land/         # ERA5-Land
+│   ├── temperature_2m/
+│   │   ├── year_1950.om          # Historical (9 GB/year)
+│   │   ├── ...year_2024.om
+│   │   ├── chunk_904.om          # Recent data
+│   │   └── ...
+```
+
+| File Type | Pattern | Coverage | Size |
+|-----------|---------|----------|------|
+| Chunk | `chunk_XXX.om` | Rolling ~4 years | ~230 MB |
+| Year | `year_YYYY.om` | 1950-present | ~9 GB |
+
+Chunk timing: 504 hours (21 days) per chunk. Reference: chunk 975 starts 2026-01-11.
+
+### S3 Available Variables
+
+**copernicus_era5** (chunks only, 2022+):
+- temperature_2m, dew_point_2m, pressure_msl, shortwave_radiation, precipitation
+- cloud_cover, wind components, soil variables
+
+**copernicus_era5_land** (year files 1950+):
+- temperature_2m, dew_point_2m (limited variables in historical files)
+
+**Not available in S3**:
+- Surface geopotential (z) — static file has nodata issues
+- Longwave radiation (strd)
+- Specific humidity (q)
+- **Any pressure level data**
+
+### Reading .om Files
+
+```python
+import fsspec
+from omfiles import OmFileReader
+
+backend = fsspec.open(
+    "blockcache::s3://openmeteo/data/copernicus_era5/temperature_2m/chunk_975.om",
+    mode="rb",
+    s3={"anon": True},
+    blockcache={"cache_storage": "/tmp/cache"},
+)
+
+with backend as f:
+    reader = OmFileReader(f)
+    # Shape is (lat, lon, time) - lat descending 90° to -90°
+    data = reader[114:121, 746:755, 0:24]  # bbox subset, 24 hours
+```
+
+### Recommendations
+
+| Use Case | Recommended Backend |
+|----------|---------------------|
+| Small region, quick results | API |
+| Large region (>1000 points) | S3 |
+| Grid consistency required | S3 (not API) |
+| Pressure levels needed | Google/CDS |
+| Historical data (pre-2022) | S3 year files or Google |
+| Surface + pressure combined | Google (or hybrid) |
+
+### Prototype S3 Backend
+
+A prototype implementation exists at `src/OM/openmeteo_s3_backend.py` with:
+- Parallel variable fetching (configurable workers)
+- Year file support for historical data
+- ERA5Backend-compatible interface
+
+To integrate, the backend needs:
+- Missing variable handling (z, strd, q)
+- Cross-chunk reads for date ranges spanning boundaries
+- Registration in backends registry
