@@ -26,9 +26,11 @@ Formal definitions for each NWP source, organized by module.
 
 #### Regional
 
-| Source | ID | Resolution | Spatial Coverage | Temporal Coverage | S3 URL | Auth |
-|--------|-----|------------|------------------|-------------------|--------|------|
-| Switch S3 (Central Asia) | `s3zarr` | 31 km | 43-90°E, 24-58°N | 1940-2023 | `s3://spi-pamir-c7-sdsc/era5_data/central_asia.zarr/` | S3 keys |
+| Source | ID | Resolution | Spatial Coverage | Temporal | Variables | S3 URL | Auth |
+|--------|-----|------------|------------------|----------|-----------|--------|------|
+| Switch S3 (Central Asia) | `s3zarr` | 31 km | 43-90°E, 24-58°N | 1940-2023 | 15 (10 surf + 5 plev) | `s3://spi-pamir-c7-sdsc/...` | S3 keys |
+
+**Variables in S3 store:** t2m, d2m, sp, z_surf, ssrd, strd, tisr, tp, u10, v10 (surface) + t, z, u, v, q (pressure levels @ 8 levels)
 
 **Regional sources are preferred when bbox fits within coverage** - faster, pre-subset.
 
@@ -122,9 +124,11 @@ resolution_km: 31
 bbox: [43, 24, 90, 58]  # Central Asia: west, south, east, north
 time_range: [1940-01-01, 2023-12-31]
 variables:
-  surface: [t2m, d2m, sp, z_surf, ssrd, strd, tp, tisr, u10, v10]
+  # All 15 variables in the store:
+  surface: [t2m, d2m, sp, z_surf, ssrd, strd, tisr, tp, u10, v10]
   pressure: [t, z, u, v, q]
-  levels: [300, 500, 600, 700, 800, 850, 900, 1000]
+  # Note: z is on pressure levels, z_surf is surface geopotential
+levels: [300, 500, 600, 700, 800, 850, 900, 1000]  # 8 levels
 auth:
   type: s3
   env_vars: [AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY]
