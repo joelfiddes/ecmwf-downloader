@@ -9,3 +9,8 @@ build/
 era5_cache/
 cds_tmp/
 *.tmp
+
+# Test outputs
+test_output/
+*.grib2
+*.grib2.*.idx
