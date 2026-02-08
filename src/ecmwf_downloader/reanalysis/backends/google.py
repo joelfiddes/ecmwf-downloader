@@ -22,6 +22,7 @@ import fsspec
 import pandas as pd
 import xarray as xr
 from tenacity import retry, stop_after_attempt, wait_exponential
+from tqdm import tqdm
 
 from ecmwf_downloader.base import ERA5Backend
 from ecmwf_downloader.bbox import BBox
@@ -66,6 +67,7 @@ class GoogleCloudBackend(ERA5Backend):
         cache_dir: str = "./era5_cache/",
         surf_vars: list[str] | None = None,
         plev_vars: list[str] | None = None,
+        show_progress: bool = True,
         **kwargs,
     ):
         super().__init__(bbox, pressure_levels, time_resolution, **kwargs)
@@ -75,6 +77,7 @@ class GoogleCloudBackend(ERA5Backend):
 
         self.surf_vars = surf_vars or DEFAULT_SURF_VARS
         self.plev_vars = plev_vars or DEFAULT_PLEV_VARS
+        self.show_progress = show_progress
 
         self._time_steps = TIME_RESOLUTION_HOURS.get(time_resolution)
         if self._time_steps is None:
@@ -251,7 +254,15 @@ class GoogleCloudBackend(ERA5Backend):
         # (open_mfdataset with combine_by_coords fails when files have
         # different variables but same coordinates - they need merge, not concat)
         datasets = []
-        for f in flist:
+        iterator = flist
+        if self.show_progress:
+            iterator = tqdm(
+                flist,
+                desc=f"Google {date.strftime('%Y-%m-%d')}",
+                unit="file",
+                leave=False,
+            )
+        for f in iterator:
             ds_single = xr.open_dataset(f, engine="scipy")
             ds_single = self._preprocess(ds_single).load()  # Load immediately
             datasets.append(ds_single)

@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xarray as xr
+from tqdm import tqdm
 
 from ecmwf_downloader.bbox import BBox
 from ecmwf_downloader.derived import compute_surface_geopotential
@@ -112,6 +113,7 @@ class ECMWFOpenDataBackend(ForecastBackend):
         pressure_levels: list[int] | None = None,
         output_timestep: str = "1H",
         forecast_hour: int = 0,
+        show_progress: bool = True,
         **kwargs,
     ):
         levels = pressure_levels or IFS_DEFAULT_LEVELS
@@ -127,6 +129,7 @@ class ECMWFOpenDataBackend(ForecastBackend):
         if forecast_hour not in (0, 12):
             raise ValueError("forecast_hour must be 0 or 12")
         self.forecast_hour = forecast_hour
+        self.show_progress = show_progress
 
     @property
     def forecast_horizon_hours(self) -> int:
@@ -155,47 +158,54 @@ class ECMWFOpenDataBackend(ForecastBackend):
             self.forecast_hour,
         )
 
-        # Surface fc1
-        client.retrieve(
-            time=self.forecast_hour,
-            date=delta_days,
-            step=fc1_steps,
-            type="fc",
-            param=IFS_SURF_PARAMS,
-            target=str(tmp_dir / "SURF_fc1.grib2"),
-        )
+        downloads = [
+            ("SURF fc1", dict(
+                time=self.forecast_hour,
+                date=delta_days,
+                step=fc1_steps,
+                type="fc",
+                param=IFS_SURF_PARAMS,
+                target=str(tmp_dir / "SURF_fc1.grib2"),
+            )),
+            ("PLEV fc1", dict(
+                time=self.forecast_hour,
+                date=delta_days,
+                step=fc1_steps,
+                type="fc",
+                param=IFS_PLEV_PARAMS,
+                levelist=self.pressure_levels,
+                target=str(tmp_dir / "PLEV_fc1.grib2"),
+            )),
+            ("SURF fc2", dict(
+                time=self.forecast_hour,
+                date=delta_days,
+                step=fc2_steps,
+                type="fc",
+                param=IFS_SURF_PARAMS,
+                target=str(tmp_dir / "SURF_fc2.grib2"),
+            )),
+            ("PLEV fc2", dict(
+                time=self.forecast_hour,
+                date=delta_days,
+                step=fc2_steps,
+                type="fc",
+                param=IFS_PLEV_PARAMS,
+                levelist=self.pressure_levels,
+                target=str(tmp_dir / "PLEV_fc2.grib2"),
+            )),
+        ]
 
-        # Pressure levels fc1
-        client.retrieve(
-            time=self.forecast_hour,
-            date=delta_days,
-            step=fc1_steps,
-            type="fc",
-            param=IFS_PLEV_PARAMS,
-            levelist=self.pressure_levels,
-            target=str(tmp_dir / "PLEV_fc1.grib2"),
-        )
+        iterator = downloads
+        if self.show_progress:
+            iterator = tqdm(
+                downloads,
+                desc=f"IFS {init_time.strftime('%Y-%m-%d')} {self.forecast_hour:02d}Z",
+                unit="file",
+                leave=False,
+            )
 
-        # Surface fc2
-        client.retrieve(
-            time=self.forecast_hour,
-            date=delta_days,
-            step=fc2_steps,
-            type="fc",
-            param=IFS_SURF_PARAMS,
-            target=str(tmp_dir / "SURF_fc2.grib2"),
-        )
-
-        # Pressure levels fc2
-        client.retrieve(
-            time=self.forecast_hour,
-            date=delta_days,
-            step=fc2_steps,
-            type="fc",
-            param=IFS_PLEV_PARAMS,
-            levelist=self.pressure_levels,
-            target=str(tmp_dir / "PLEV_fc2.grib2"),
-        )
+        for name, params in iterator:
+            client.retrieve(**params)
 
     def _process_surface(
         self, fc1_path: Path, fc2_path: Path

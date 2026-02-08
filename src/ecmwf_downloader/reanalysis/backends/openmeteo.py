@@ -29,6 +29,7 @@ from collections import deque
 import numpy as np
 import pandas as pd
 import xarray as xr
+from tqdm import tqdm
 
 from ecmwf_downloader.base import ERA5Backend
 from ecmwf_downloader.bbox import BBox
@@ -135,6 +136,7 @@ class OpenMeteoBackend(ERA5Backend):
         end_date: str | None = None,
         model: str = "era5",
         batch_size: int = 20,
+        show_progress: bool = True,
         **kwargs,
     ):
         super().__init__(bbox, pressure_levels, time_resolution, **kwargs)
@@ -151,6 +153,7 @@ class OpenMeteoBackend(ERA5Backend):
         if model not in ("era5", "ifs"):
             raise ValueError(f"model must be 'era5' or 'ifs', got '{model}'")
         self._model = model
+        self.show_progress = show_progress
 
         self._time_steps = TIME_RESOLUTION_HOURS.get(time_resolution)
         if self._time_steps is None:
@@ -316,13 +319,25 @@ class OpenMeteoBackend(ERA5Backend):
 
         # Batch API calls
         all_responses: list[dict] = []
-        for i in range(0, len(grid_lats), self._batch_size):
+        n_batches = math.ceil(len(grid_lats) / self._batch_size)
+        batch_indices = list(range(0, len(grid_lats), self._batch_size))
+
+        iterator = batch_indices
+        if self.show_progress:
+            iterator = tqdm(
+                batch_indices,
+                desc=f"OpenMeteo {self._model.upper()}",
+                unit="batch",
+                leave=False,
+            )
+
+        for i in iterator:
             batch_lats = grid_lats[i : i + self._batch_size]
             batch_lons = grid_lons[i : i + self._batch_size]
             logger.debug(
                 "Fetching batch %d/%d (%d points)",
                 i // self._batch_size + 1,
-                math.ceil(len(grid_lats) / self._batch_size),
+                n_batches,
                 len(batch_lats),
             )
             responses = self._query_api(

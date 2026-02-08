@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 import xarray as xr
+from tqdm import tqdm
 
 from ecmwf_downloader.base import ERA5Backend
 from ecmwf_downloader.bbox import BBox
@@ -133,6 +134,7 @@ class CDSBackend(ERA5Backend):
         surf_vars: list[str] | None = None,
         plev_vars: list[str] | None = None,
         tmp_dir: str | None = None,
+        show_progress: bool = True,
         **kwargs,
     ):
         super().__init__(bbox, pressure_levels, time_resolution, **kwargs)
@@ -143,6 +145,7 @@ class CDSBackend(ERA5Backend):
         self.plev_vars = plev_vars or DEFAULT_PLEV_VARS
         self._tmp_dir = Path(tmp_dir) if tmp_dir else Path("./cds_tmp/")
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
+        self.show_progress = show_progress
 
         self._time_strings = TIME_RESOLUTION_STRINGS.get(time_resolution)
         if self._time_strings is None:
@@ -217,8 +220,26 @@ class CDSBackend(ERA5Backend):
         date = pd.Timestamp(date)
         logger.info("Fetching CDS ERA5 data for %s", date.strftime("%Y-%m-%d"))
 
-        surf_file = self._request_surf(date)
-        plev_file = self._request_plev(date)
+        tasks = [
+            ("surface", self._request_surf),
+            ("pressure", self._request_plev),
+        ]
+
+        results = {}
+        iterator = tasks
+        if self.show_progress:
+            iterator = tqdm(
+                tasks,
+                desc=f"CDS {date.strftime('%Y-%m-%d')}",
+                unit="req",
+                leave=False,
+            )
+
+        for name, request_func in iterator:
+            results[name] = request_func(date)
+
+        surf_file = results["surface"]
+        plev_file = results["pressure"]
 
         ds_surf = xr.open_dataset(surf_file).load()
         ds_plev = xr.open_dataset(plev_file).load()

@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
 import xarray as xr
+from tqdm import tqdm
 
 from ecmwf_downloader.bbox import BBox
 from ecmwf_downloader.forecast.base import ForecastBackend
@@ -113,6 +114,7 @@ class OpenMeteoIFSBackend(ForecastBackend):
         output_timestep: str = "1H",
         forecast_days: int = 10,
         batch_size: int = 20,
+        show_progress: bool = True,
         **kwargs,
     ):
         levels = pressure_levels or [1000, 850, 700, 500, 300]
@@ -129,6 +131,7 @@ class OpenMeteoIFSBackend(ForecastBackend):
         self.forecast_days = forecast_days
         self._batch_size = batch_size
         self._rate_limiter = _RateLimiter()
+        self.show_progress = show_progress
 
         self._timestep_hours = {"1H": 1, "2H": 2, "3H": 3}.get(output_timestep, 1)
 
@@ -378,13 +381,25 @@ class OpenMeteoIFSBackend(ForecastBackend):
 
         # Batch API calls
         all_responses: list[dict] = []
-        for i in range(0, len(grid_lats), self._batch_size):
+        n_batches = math.ceil(len(grid_lats) / self._batch_size)
+        batch_indices = list(range(0, len(grid_lats), self._batch_size))
+
+        iterator = batch_indices
+        if self.show_progress:
+            iterator = tqdm(
+                batch_indices,
+                desc=f"OpenMeteo IFS",
+                unit="batch",
+                leave=False,
+            )
+
+        for i in iterator:
             batch_lats = grid_lats[i : i + self._batch_size]
             batch_lons = grid_lons[i : i + self._batch_size]
             logger.debug(
                 "Fetching batch %d/%d (%d points)",
                 i // self._batch_size + 1,
-                math.ceil(len(grid_lats) / self._batch_size),
+                n_batches,
                 len(batch_lats),
             )
             responses = self._query_api(batch_lats, batch_lons, start_date, end_date)

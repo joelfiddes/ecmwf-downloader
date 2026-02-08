@@ -31,9 +31,21 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xarray as xr
+from tqdm import tqdm
 
 from ecmwf_downloader.base import ERA5Backend
 from ecmwf_downloader.bbox import BBox
+
+
+class TqdmLoggingHandler(logging.Handler):
+    """Logging handler that uses tqdm.write() to avoid breaking progress bars."""
+
+    def emit(self, record):
+        try:
+            tqdm.write(self.format(record))
+        except Exception:
+            self.handleError(record)
+
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +110,7 @@ class OpenMeteoS3Backend(ERA5Backend):
         cache_dir: str = "/tmp/openmeteo_s3_cache",
         max_workers: int = 4,
         dataset: str = "era5",  # "era5" or "era5_land"
+        show_progress: bool = True,
         **kwargs,
     ):
         # Note: pressure_levels passed to parent but not used
@@ -107,6 +120,7 @@ class OpenMeteoS3Backend(ERA5Backend):
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.max_workers = max_workers
         self.dataset = dataset
+        self.show_progress = show_progress
 
         # Dataset path prefix
         self._dataset_prefix = f"copernicus_{dataset}"
@@ -311,17 +325,34 @@ class OpenMeteoS3Backend(ERA5Backend):
                 return era5_name, None
 
         surf_arrays: dict[str, np.ndarray] = {}
+        var_items = list(S3_SURFACE_VARS.keys())
+
         if self.max_workers > 1:
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                futures = {
-                    executor.submit(fetch_var, name): name for name in S3_SURFACE_VARS
-                }
-                for future in as_completed(futures):
+                futures = {executor.submit(fetch_var, name): name for name in var_items}
+                iterator = as_completed(futures)
+                if self.show_progress:
+                    iterator = tqdm(
+                        iterator,
+                        total=len(futures),
+                        desc=f"Fetching {date.strftime('%Y-%m-%d')}",
+                        unit="var",
+                        leave=False,
+                    )
+                for future in iterator:
                     era5_name, data = future.result()
                     if data is not None:
                         surf_arrays[era5_name] = data
         else:
-            for s3_name in S3_SURFACE_VARS:
+            iterator = var_items
+            if self.show_progress:
+                iterator = tqdm(
+                    iterator,
+                    desc=f"Fetching {date.strftime('%Y-%m-%d')}",
+                    unit="var",
+                    leave=False,
+                )
+            for s3_name in iterator:
                 era5_name, data = fetch_var(s3_name)
                 if data is not None:
                     surf_arrays[era5_name] = data
