@@ -213,6 +213,7 @@ class ZarrWriter(BaseWriter):
         output_dir: Base output directory.
         chunks: Chunk sizes for the merged zarr store.
         merge: Whether to merge daily stores in finalize(). Default True.
+        cleanup_daily: Whether to delete daily stores after successful merge. Default True.
     """
 
     def __init__(
@@ -220,12 +221,14 @@ class ZarrWriter(BaseWriter):
         output_dir: str | Path,
         chunks: dict | None = None,
         merge: bool = True,
+        cleanup_daily: bool = True,
     ):
         self.output_dir = Path(output_dir)
         self.daily_dir = self.output_dir / "daily"
         self.daily_dir.mkdir(parents=True, exist_ok=True)
         self.zarr_path = self.output_dir / "ERA5.zarr"
         self.merge = merge
+        self.cleanup_daily = cleanup_daily
 
         # Chunks optimized for typical regional domains
         # time=24 matches daily download granularity
@@ -382,7 +385,14 @@ class ZarrWriter(BaseWriter):
 
         logger.info("Zarr merge complete: %s", self.zarr_path)
 
-        # Optionally clean up daily stores to save space
-        # For now, keep them for resumability
-        # for p in daily_stores:
-        #     shutil.rmtree(p)
+        # Clean up daily stores after successful merge
+        if self.cleanup_daily:
+            logger.info("Cleaning up %d daily stores...", len(daily_stores))
+            for p in daily_stores:
+                shutil.rmtree(p)
+            # Remove empty daily directory
+            try:
+                self.daily_dir.rmdir()
+            except OSError:
+                pass  # Directory not empty (other files present)
+            logger.info("Daily stores removed")
