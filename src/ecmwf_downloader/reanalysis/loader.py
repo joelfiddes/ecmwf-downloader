@@ -40,6 +40,8 @@ class ERA5Loader:
         compute_rh: If True, compute relative humidity from q if missing.
         skip_existing: If True, skip dates already downloaded.
         backend_kwargs: Extra keyword arguments passed to the backend constructor.
+        writer_kwargs: Extra keyword arguments passed to the writer constructor.
+            For ZarrWriter: merge (bool), cleanup_daily (bool), chunks (dict).
 
     Example::
 
@@ -69,6 +71,7 @@ class ERA5Loader:
         compute_rh: bool = True,
         skip_existing: bool = True,
         backend_kwargs: dict = None,
+        writer_kwargs: dict = None,
     ):
         # Resolve bbox
         if isinstance(bbox, (tuple, list)):
@@ -111,10 +114,11 @@ class ERA5Loader:
             self._backend = backend
 
         # Resolve writer
+        writer_kwargs = writer_kwargs or {}
         if output_format == "netcdf":
-            self._writer: BaseWriter = NetCDFWriter(output_dir)
+            self._writer: BaseWriter = NetCDFWriter(output_dir, **writer_kwargs)
         elif output_format == "zarr":
-            self._writer = ZarrWriter(output_dir)
+            self._writer = ZarrWriter(output_dir, **writer_kwargs)
         else:
             raise ValueError(f"Unknown output_format: {output_format}")
 
