@@ -224,11 +224,18 @@ class GoogleCloudBackend(ERA5Backend):
         return ds
 
     def _clear_cache(self):
-        """Remove temporary cache files."""
+        """Remove temporary cache files.
+
+        Handles race conditions when multiple threads clean up simultaneously.
+        """
         if hasattr(self, "_tmp_dir") and self._tmp_dir.exists():
             for f in self._tmp_dir.iterdir():
                 if f.is_file():
-                    f.unlink()
+                    try:
+                        f.unlink()
+                    except FileNotFoundError:
+                        # Another thread already deleted this file
+                        pass
             try:
                 self._tmp_dir.rmdir()
             except OSError:

@@ -291,6 +291,14 @@ class ZarrWriter(BaseWriter):
         # Merge surface and plev into one dataset
         ds = xr.merge([ds_surf, ds_plev])
 
+        # Strip encoding from source datasets to avoid conflicts with zarr 3.x
+        # Source zarr datasets may have numcodecs compressors in their encoding
+        # which are incompatible with zarr 3.x's new codec API
+        for var in ds.data_vars:
+            ds[var].encoding.clear()
+        for coord in ds.coords:
+            ds[coord].encoding.clear()
+
         # Path for this day's store
         day_path = self.daily_dir / f"day_{date_str}.zarr"
 
@@ -344,6 +352,12 @@ class ZarrWriter(BaseWriter):
         # Rechunk for merged store
         chunks = {k: v for k, v in self.chunks.items() if k in ds.dims}
         ds = ds.chunk(chunks)
+
+        # Strip encoding from source datasets to avoid conflicts with zarr 3.x
+        for var in ds.data_vars:
+            ds[var].encoding.clear()
+        for coord in ds.coords:
+            ds[coord].encoding.clear()
 
         # Build encoding with compression
         compressor, comp_key = self._get_compressor()
