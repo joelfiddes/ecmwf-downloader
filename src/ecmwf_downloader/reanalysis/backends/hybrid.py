@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 # s3zarr Central Asia coverage
 S3ZARR_BBOX = BBox.from_tuple((43.0, 24.0, 90.0, 58.0))
 S3ZARR_END_DATE = pd.Timestamp("2023-12-31")
+S3ZARR_URL = "s3://spi-pamir-c7-sdsc/era5_data/central_asia.zarr/"
 
 # ── Variable groups ──────────────────────────────────────────────────────────
 
@@ -121,9 +122,25 @@ class HybridBackend(ERA5Backend):
         # Check if s3zarr is available
         try:
             from ecmwf_downloader.reanalysis.backends import _check_available
-            return _check_available("s3zarr")
+            if not _check_available("s3zarr"):
+                return False
         except ImportError:
             return False
+
+        # Check if S3 credentials are configured
+        import os
+        has_creds = (
+            os.environ.get("AWS_ACCESS_KEY_ID")
+            and os.environ.get("AWS_SECRET_ACCESS_KEY")
+        )
+        if not has_creds:
+            logger.warning(
+                "S3 credentials not found (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY). "
+                "Regional s3zarr backend disabled, falling back to Google ARCO-ERA5."
+            )
+            return False
+
+        return True
 
     def _get_surface_backend(self) -> ERA5Backend:
         """Get or create the surface variables backend."""
@@ -249,8 +266,9 @@ class HybridBackend(ERA5Backend):
                 bbox=self.bbox,
                 pressure_levels=self.pressure_levels,
                 cache_dir=self.cache_dir,
+                zarr_url=S3ZARR_URL,
             )
-            logger.info("HybridBackend: using regional s3zarr backend")
+            logger.info("HybridBackend: using regional s3zarr backend at %s", S3ZARR_URL)
 
         return self._regional_backend
 

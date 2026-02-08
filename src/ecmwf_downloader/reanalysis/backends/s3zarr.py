@@ -113,9 +113,20 @@ class S3ZarrBackend(ERA5Backend):
         ds_surf = ds_day[available_surf].load()
         ds_plev = ds_day[available_plev]
 
-        # Select pressure levels
+        # Select pressure levels (only those available in store)
         if "level" in ds_plev.dims and self.pressure_levels:
-            ds_plev = ds_plev.sel(level=self.pressure_levels)
+            available_levels = ds_plev.level.values.tolist()
+            requested = [lv for lv in self.pressure_levels if lv in available_levels]
+            if not requested:
+                logger.warning(
+                    "No requested levels %s found in store levels %s",
+                    self.pressure_levels, available_levels
+                )
+            else:
+                if len(requested) < len(self.pressure_levels):
+                    missing = [lv for lv in self.pressure_levels if lv not in available_levels]
+                    logger.warning("Levels %s not in store, using %s", missing, requested)
+                ds_plev = ds_plev.sel(level=requested)
 
         ds_plev = ds_plev.load()
 

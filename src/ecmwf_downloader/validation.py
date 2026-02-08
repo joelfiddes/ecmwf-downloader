@@ -33,26 +33,45 @@ def daily_netcdf_exists(output_dir: str | Path, prefix: str, date: pd.Timestamp)
         return False
 
 
-def zarr_day_exists(zarr_path: str | Path, date: pd.Timestamp) -> bool:
-    """Check if a day already exists in a zarr store.
+def zarr_day_exists(output_dir: str | Path, date: pd.Timestamp) -> bool:
+    """Check if a day already exists as a per-day zarr store.
+
+    Checks for daily/day_YYYYMMDD.zarr stores (new format) or
+    dates in ERA5.zarr (legacy format).
 
     Args:
-        zarr_path: Path to the zarr store.
+        output_dir: Base output directory.
         date: The date to check.
 
     Returns:
         True if the date's data is present.
     """
-    zarr_path = Path(zarr_path)
-    if not zarr_path.exists():
-        return False
-    try:
-        ds = xr.open_zarr(zarr_path)
-        times = pd.DatetimeIndex(ds.time.values)
-        ds.close()
-        return date.normalize() in times.normalize()
-    except Exception:
-        return False
+    output_dir = Path(output_dir)
+
+    # Check per-day store (new format)
+    day_path = output_dir / "daily" / f"day_{date:%Y%m%d}.zarr"
+    if day_path.exists():
+        try:
+            ds = xr.open_zarr(day_path)
+            has_data = ds.sizes.get("time", 0) > 0
+            ds.close()
+            return has_data
+        except Exception:
+            logger.warning("Corrupt zarr store detected: %s", day_path)
+            return False
+
+    # Check merged store (legacy format)
+    zarr_path = output_dir / "ERA5.zarr"
+    if zarr_path.exists():
+        try:
+            ds = xr.open_zarr(zarr_path)
+            times = pd.DatetimeIndex(ds.time.values)
+            ds.close()
+            return date.normalize() in times.normalize()
+        except Exception:
+            return False
+
+    return False
 
 
 def get_existing_dates(
@@ -65,7 +84,7 @@ def get_existing_dates(
     Args:
         output_dir: Base output directory.
         output_format: 'netcdf' or 'zarr'.
-        prefix: File prefix to check ('dSURF' or 'dPLEV').
+        prefix: File prefix to check ('dSURF' or 'dPLEV'). Ignored for zarr.
 
     Returns:
         Set of dates already present.
@@ -82,14 +101,26 @@ def get_existing_dates(
                     existing.add(pd.Timestamp(date_str))
                 except (IndexError, ValueError):
                     continue
+
     elif output_format == "zarr":
+        # Check per-day stores (new format)
+        daily_dir = output_dir / "daily"
+        if daily_dir.exists():
+            for f in daily_dir.glob("day_*.zarr"):
+                try:
+                    date_str = f.stem.split("_")[1]
+                    existing.add(pd.Timestamp(date_str))
+                except (IndexError, ValueError):
+                    continue
+
+        # Also check merged store (legacy format)
         zarr_path = output_dir / "ERA5.zarr"
         if zarr_path.exists():
             try:
                 ds = xr.open_zarr(zarr_path)
                 times = pd.DatetimeIndex(ds.time.values)
                 ds.close()
-                existing = set(times.normalize().unique())
+                existing.update(times.normalize().unique())
             except Exception:
                 pass
 
