@@ -10,14 +10,25 @@ Ported from: era5google/makedatasets2.py + TopoPyScale/fetch_era5_zarr.py
 from __future__ import annotations
 
 import logging
+import os
 
 import pandas as pd
 import xarray as xr
+
+try:
+    import dotenv
+    _HAS_DOTENV = True
+except ImportError:
+    _HAS_DOTENV = False
 
 from ecmwf_downloader.base import ERA5Backend
 from ecmwf_downloader.bbox import BBox
 
 logger = logging.getLogger(__name__)
+
+# Default S3 Zarr URL (Central Asia ERA5 store on SWITCH)
+DEFAULT_ZARR_URL = "s3://spi-pamir-c7-sdsc/era5_data/central_asia.zarr/"
+DEFAULT_ENDPOINT_URL = "https://os.zhdk.cloud.switch.ch"
 
 # Default variable groupings expected in the zarr store
 DEFAULT_SURF_VARS = ["d2m", "sp", "ssrd", "strd", "t2m", "tp", "z_surf"]
@@ -59,13 +70,35 @@ class S3ZarrBackend(ERA5Backend):
     ):
         super().__init__(bbox, pressure_levels, time_resolution, **kwargs)
 
+        # Use default Central Asia store if no URL provided
         if not zarr_url:
-            raise ValueError("zarr_url is required for S3ZarrBackend")
+            zarr_url = DEFAULT_ZARR_URL
 
         self.zarr_url = zarr_url
         self.surf_vars = surf_vars or DEFAULT_SURF_VARS
         self.plev_vars = plev_vars or DEFAULT_PLEV_VARS
+
+        # Build storage options from environment variables if not provided
         self._storage_options = storage_options or {}
+        if not self._storage_options:
+            # Load .env file from current directory if dotenv is available
+            if _HAS_DOTENV:
+                dotenv.load_dotenv()
+
+            # Load credentials from environment, or use default endpoint for SWITCH
+            endpoint_url = os.environ.get("AWS_ENDPOINT_URL")
+
+            # Use default SWITCH endpoint when using default Central Asia store
+            if not endpoint_url and self.zarr_url == DEFAULT_ZARR_URL:
+                endpoint_url = DEFAULT_ENDPOINT_URL
+
+            if endpoint_url:
+                self._storage_options["client_kwargs"] = {"endpoint_url": endpoint_url}
+
+            logger.debug(
+                "Using S3 storage options: endpoint=%s",
+                endpoint_url,
+            )
 
         # Open the zarr store once and keep it open
         self._ds = xr.open_zarr(
