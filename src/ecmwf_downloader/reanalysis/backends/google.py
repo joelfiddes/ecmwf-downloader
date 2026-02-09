@@ -294,23 +294,44 @@ class GoogleCloudBackend(ERA5Backend):
             ds_single = self._preprocess(ds_single, fsspec_cache).load()  # Load immediately
             datasets.append(ds_single)
 
-        # Merge all datasets (handles different variables with same coords)
-        ds = xr.merge(datasets, compat="override", join="outer")
+        # Separate surface and pressure-level datasets before merging
+        # Pressure-level data: group by variable, concat along level, then merge
+        surf_datasets = []
+        plev_by_var = {}  # dict of var_name -> list of single-level datasets
+
+        for ds_single in datasets:
+            has_level = any("level" in ds_single[v].dims for v in ds_single.data_vars)
+            if has_level:
+                # Group by variable name for later concatenation
+                for var_name in ds_single.data_vars:
+                    if "level" in ds_single[var_name].dims:
+                        if var_name not in plev_by_var:
+                            plev_by_var[var_name] = []
+                        # Extract just this variable as a dataset
+                        plev_by_var[var_name].append(ds_single[[var_name]])
+            else:
+                surf_datasets.append(ds_single)
+
+        # Merge surface datasets (different variables, same coords)
+        if surf_datasets:
+            ds_surf = xr.merge(surf_datasets, compat="override", join="outer")
+        else:
+            ds_surf = xr.Dataset()
+
+        # For pressure-level data: concat each variable along level, then merge
+        if plev_by_var:
+            plev_merged = []
+            for var_name, var_datasets in plev_by_var.items():
+                # Concatenate this variable along level dimension
+                var_concat = xr.concat(var_datasets, dim="level", combine_attrs="override")
+                plev_merged.append(var_concat)
+            # Merge all concatenated variables
+            ds_plev = xr.merge(plev_merged, compat="override", join="outer")
+        else:
+            ds_plev = xr.Dataset()
 
         # Clean up this call's temporary directory (thread-safe: each call has its own)
         self._clear_cache(tmp_dir)
-
-        # Split into surface and pressure-level datasets
-        surf_vars = []
-        plev_vars = []
-        for var in ds.data_vars:
-            if "level" in ds[var].dims:
-                plev_vars.append(var)
-            else:
-                surf_vars.append(var)
-
-        ds_surf = ds[surf_vars] if surf_vars else xr.Dataset()
-        ds_plev = ds[plev_vars] if plev_vars else xr.Dataset()
 
         # Sort pressure levels ascending
         if "level" in ds_plev.dims:
