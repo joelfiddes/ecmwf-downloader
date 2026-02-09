@@ -316,18 +316,9 @@ class GoogleCloudBackend(ERA5Backend):
         if "level" in ds_plev.dims:
             ds_plev = ds_plev.sortby("level", ascending=True)
 
-        # Rename short names from Google's variable names
-        surf_rename = {}
-        for long_name, short_name in SURF_VARS_GOOGLE.items():
-            # Surface geopotential was renamed to z_surf in preprocess
-            if long_name in VARS_BOTH_SURFACE_AND_LEVEL:
-                if short_name + "_surf" in ds_surf:
-                    surf_rename[short_name + "_surf"] = short_name
-            # Other variables keep their short name from the netCDF
-            # (Google files already use short names as data var keys)
-
-        if surf_rename:
-            ds_surf = ds_surf.rename(surf_rename)
+        # Note: Surface geopotential is kept as z_surf (renamed in preprocess)
+        # to avoid conflict with pressure-level z. Other variables already
+        # have their short names from the netCDF files.
 
         logger.info(
             "Fetched: SURF vars=%s, PLEV vars=%s, levels=%s",
