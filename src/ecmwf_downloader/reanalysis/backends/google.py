@@ -153,38 +153,52 @@ class GoogleCloudBackend(ERA5Backend):
                     yield URI_LEVELS.format(t=t, variable=variable, level=level)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10), reraise=True)
-    def _download_files(self, uri_list: list[str]) -> list[str]:
-        """Download files using fsspec with filecache."""
-        tmp_dir = tempfile.mkdtemp(dir=str(self._cache_dir))
+    def _download_files(self, uri_list: list[str]) -> tuple[list[str], pathlib.Path, dict]:
+        """Download files using fsspec with filecache.
+
+        Returns:
+            Tuple of (file_list, tmp_dir, fsspec_cache) - all local to this call,
+            not stored as instance variables to avoid race conditions in parallel downloads.
+        """
+        tmp_dir = pathlib.Path(tempfile.mkdtemp(dir=str(self._cache_dir)))
         logger.debug("Downloading %d files to %s", len(uri_list), tmp_dir)
 
         flist = fsspec.open_local(
             url=uri_list,
-            filecache=dict(cache_storage=tmp_dir),
+            filecache=dict(cache_storage=str(tmp_dir)),
             gs=dict(token="anon"),
         )
 
         # Read fsspec cache for URI mapping
-        cache_file = pathlib.Path(tmp_dir) / "cache"
+        cache_file = tmp_dir / "cache"
         if cache_file.exists():
             with open(cache_file) as f:
                 cache = json.load(f)
-            self._fsspec_cache = {cache[k]["fn"]: cache[k] for k in cache}
+            fsspec_cache = {cache[k]["fn"]: cache[k] for k in cache}
         else:
-            self._fsspec_cache = {}
+            fsspec_cache = {}
 
-        self._tmp_dir = pathlib.Path(tmp_dir)
-        return list(flist)
+        return list(flist), tmp_dir, fsspec_cache
 
-    def _get_original_uri(self, ds: xr.Dataset) -> str:
-        """Look up the original URI from fsspec cache."""
+    def _get_original_uri(self, ds: xr.Dataset, fsspec_cache: dict) -> str:
+        """Look up the original URI from fsspec cache.
+
+        Args:
+            ds: Dataset with encoding["source"] pointing to cached file.
+            fsspec_cache: Cache dict mapping file hashes to metadata (local to fetch_day call).
+        """
         fname_hash = pathlib.Path(ds.encoding["source"]).name
-        entry = self._fsspec_cache.get(fname_hash, {})
+        entry = fsspec_cache.get(fname_hash, {})
         return entry.get("original", "")
 
-    def _preprocess(self, ds: xr.Dataset) -> xr.Dataset:
-        """Preprocess a single file: subset, rename, add level dim."""
-        uri = self._get_original_uri(ds)
+    def _preprocess(self, ds: xr.Dataset, fsspec_cache: dict) -> xr.Dataset:
+        """Preprocess a single file: subset, rename, add level dim.
+
+        Args:
+            ds: Raw dataset from a single netCDF file.
+            fsspec_cache: Cache dict for URI lookup (local to fetch_day call).
+        """
+        uri = self._get_original_uri(ds, fsspec_cache)
         is_level = "pressure_level" in uri
 
         # Variable name from URI path
@@ -223,26 +237,32 @@ class GoogleCloudBackend(ERA5Backend):
         ds = ds.astype("float32")
         return ds
 
-    def _clear_cache(self):
+    def _clear_cache(self, tmp_dir: pathlib.Path | None = None):
         """Remove temporary cache files.
 
-        Handles race conditions when multiple threads clean up simultaneously.
+        Args:
+            tmp_dir: Temporary directory to clean up. If None, does nothing.
+                     Each fetch_day call passes its own tmp_dir to avoid race conditions.
         """
-        if hasattr(self, "_tmp_dir") and self._tmp_dir.exists():
-            for f in self._tmp_dir.iterdir():
-                if f.is_file():
-                    try:
-                        f.unlink()
-                    except FileNotFoundError:
-                        # Another thread already deleted this file
-                        pass
-            try:
-                self._tmp_dir.rmdir()
-            except OSError:
-                pass
+        if tmp_dir is None or not tmp_dir.exists():
+            return
+
+        for f in tmp_dir.iterdir():
+            if f.is_file():
+                try:
+                    f.unlink()
+                except FileNotFoundError:
+                    pass
+        try:
+            tmp_dir.rmdir()
+        except OSError:
+            pass
 
     def fetch_day(self, date: pd.Timestamp) -> tuple[xr.Dataset, xr.Dataset]:
         """Fetch one day of ERA5 data from Google ARCO-ERA5.
+
+        This method is thread-safe: each call uses its own temporary directory
+        and cache, avoiding race conditions when downloading multiple days in parallel.
 
         Args:
             date: The date to fetch.
@@ -254,7 +274,7 @@ class GoogleCloudBackend(ERA5Backend):
         logger.info("Fetching Google ARCO-ERA5 data for %s", date.strftime("%Y-%m-%d"))
 
         uri_list = list(self._make_uri_list(date))
-        flist = self._download_files(uri_list)
+        flist, tmp_dir, fsspec_cache = self._download_files(uri_list)
 
         logger.debug("Opening and preprocessing %d files", len(flist))
         # Open each file individually, preprocess, load into memory, then merge
@@ -271,13 +291,14 @@ class GoogleCloudBackend(ERA5Backend):
             )
         for f in iterator:
             ds_single = xr.open_dataset(f, engine="scipy")
-            ds_single = self._preprocess(ds_single).load()  # Load immediately
+            ds_single = self._preprocess(ds_single, fsspec_cache).load()  # Load immediately
             datasets.append(ds_single)
 
         # Merge all datasets (handles different variables with same coords)
         ds = xr.merge(datasets, compat="override", join="outer")
 
-        self._clear_cache()
+        # Clean up this call's temporary directory (thread-safe: each call has its own)
+        self._clear_cache(tmp_dir)
 
         # Split into surface and pressure-level datasets
         surf_vars = []
@@ -318,5 +339,9 @@ class GoogleCloudBackend(ERA5Backend):
         return ds_surf, ds_plev
 
     def close(self):
-        """Clean up cache."""
-        self._clear_cache()
+        """Clean up any remaining cache.
+
+        Note: With the thread-safe design, each fetch_day() cleans its own cache,
+        so this is typically a no-op. Kept for interface compatibility.
+        """
+        pass
